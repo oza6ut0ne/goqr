@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.comcom/skip2/go-qrcode"
+	"github.com/skip2/go-qrcode"
 )
 
 // The maximum number of bytes to encode in a single QR code.
