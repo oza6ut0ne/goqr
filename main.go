@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"os"
 	"path/filepath"
 
+	"github.com/kettek/apng"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -35,32 +39,69 @@ func main() {
 		log.Fatalf("Input file %s is empty.", inputFilename)
 	}
 
-	// 3. Use the input filename as a base for the output QR code files.
-	baseOutputFilename := "qr_" + filepath.Base(inputFilename)
-
-	// 4. Split the data into chunks and generate a QR code for each.
-	chunkCount := 0
+	// 3. Generate QR codes for each chunk and store them in memory as images.
+	var images []image.Image
 	for i := 0; i < len(data); i += chunkSize {
-		chunkCount++
 		end := i + chunkSize
 		if end > len(data) {
 			end = len(data)
 		}
 		chunk := data[i:end]
 
-		// Suffix the output filename with the chunk number.
-		outputFilename := fmt.Sprintf("%s_%d.png", baseOutputFilename, chunkCount)
-
-		// Generate and write the QR code to a PNG file.
-		// We use qrcode.Medium for a good balance of data density and error correction.
-		// The content is cast to a string, which is safe for binary data in Go.
-		err := qrcode.WriteFile(string(chunk), qrcode.Medium, pngSize, outputFilename)
+		// Generate the QR code as a PNG in a byte buffer.
+		pngData, err := qrcode.Encode(string(chunk), qrcode.Medium, pngSize)
 		if err != nil {
-			log.Fatalf("Failed to generate QR code for chunk %d: %v", chunkCount, err)
+			log.Fatalf("Failed to generate QR code for chunk starting at byte %d: %v", i, err)
 		}
 
-		fmt.Printf("Generated %s for chunk %d (%d bytes)\n", outputFilename, chunkCount, len(chunk))
+		// Decode the in-memory PNG into an image.Image object.
+		img, err := png.Decode(bytes.NewReader(pngData))
+		if err != nil {
+			log.Fatalf("Failed to decode generated QR code PNG for chunk starting at byte %d: %v", i, err)
+		}
+
+		images = append(images, img)
 	}
 
-	fmt.Printf("\nSuccessfully created %d QR code file(s) from %s.\n", chunkCount, inputFilename)
+	// 4. Determine the single output filename.
+	outputFilename := "qr_" + filepath.Base(inputFilename) + ".png"
+
+	// 5. Write the output file.
+	if len(images) > 1 {
+		// If there are multiple images, create an animated PNG.
+		fmt.Printf("Input is %d bytes, generating an animated PNG with %d frames.\n", len(data), len(images))
+		outFile, err := os.Create(outputFilename)
+		if err != nil {
+			log.Fatalf("Failed to create output file %s: %v", outputFilename, err)
+		}
+		defer outFile.Close()
+
+		a := apng.APNG{Frames: []apng.Frame{}}
+		for i, img := range images {
+			a.Frames = append(a.Frames, apng.Frame{
+				Image:            img,
+				DelayNumerator:   1, // 1 second delay per frame
+				DelayDenominator: 1,
+			})
+			fmt.Printf("Processing frame %d...\n", i+1)
+		}
+
+		if err = apng.Encode(outFile, a); err != nil {
+			log.Fatalf("Failed to encode animated PNG: %v", err)
+		}
+		fmt.Printf("\nSuccessfully created animated QR code %s.\n", outputFilename)
+
+	} else {
+		// If there's only one image, write a single static PNG.
+		outFile, err := os.Create(outputFilename)
+		if err != nil {
+			log.Fatalf("Failed to create output file %s: %v", outputFilename, err)
+		}
+		defer outFile.Close()
+
+		if err = png.Encode(outFile, images[0]); err != nil {
+			log.Fatalf("Failed to write single QR code to file: %v", err)
+		}
+		fmt.Printf("Successfully created QR code file %s from %s.\n", outputFilename, inputFilename)
+	}
 }
