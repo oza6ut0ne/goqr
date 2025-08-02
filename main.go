@@ -705,7 +705,6 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	}
 
 	// If PNG, try exact grid heuristic as last resort (for generated grids).
-IfPNG:
 	if ext == ".png" {
 		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
 		ff, err := os.Open(path)
@@ -818,78 +817,73 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				qrH = pngSize
 			}
 
-			// Clamp qrW/qrH so we don't go out of bounds and also ensure > 0
-			if qrW <= 0 || qrH <= 0 {
-				// If still invalid, fall back to single QR decode below.
-			} else {
-				// Iterate tiles row-major using measured qrW/qrH and known padding.
-				var payload []byte
-				qrCount := 0
-				// Use SubImage
-				sub, ok := img.(interface {
-					SubImage(r image.Rectangle) image.Image
-				})
-				if !ok {
-					return nil, 0, errors.New("image type does not support SubImage")
-				}
+			// Iterate tiles row-major using measured qrW/qrH and known padding.
+			var payload []byte
+			qrCount := 0
+			// Use SubImage
+			sub, ok := img.(interface {
+				SubImage(r image.Rectangle) image.Image
+			})
+			if !ok {
+				return nil, 0, errors.New("image type does not support SubImage")
+			}
 
-				// Number of columns/rows estimated from canvas size.
-				cols := 0
-				for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
-					cols++
-				}
-				rows := 0
-				for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
-					rows++
-				}
+			// Number of columns/rows estimated from canvas size.
+			cols := 0
+			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
+				cols++
+			}
+			rows := 0
+			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
+				rows++
+			}
 
-				// Decode each tile; stop a row when decoding fails entirely (assume trailing empties).
-				for row := 0; row < rows; row++ {
-					yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
-					rowHasData := false
-					for col := 0; col < cols; col++ {
-						xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
-						tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
-						qrImg := sub.SubImage(tileRect)
+			// Decode each tile; stop a row when decoding fails entirely (assume trailing empties).
+			for row := 0; row < rows; row++ {
+				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
+				rowHasData := false
+				for col := 0; col < cols; col++ {
+					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
+					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
+					qrImg := sub.SubImage(tileRect)
 
-						// Robustly skip marker tiles (mostly red or mostly blue)
-						if isMostlyColor(qrImg, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
-							isMostlyColor(qrImg, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
-							isSolidColor(qrImg, color.RGBA{R: 0xff, A: 0xff}) ||
-							isSolidColor(qrImg, color.RGBA{B: 0xff, A: 0xff}) {
-							continue
-						}
+					// Robustly skip marker tiles (mostly red or mostly blue)
+					if isMostlyColor(qrImg, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
+						isMostlyColor(qrImg, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
+						isSolidColor(qrImg, color.RGBA{R: 0xff, A: 0xff}) ||
+						isSolidColor(qrImg, color.RGBA{B: 0xff, A: 0xff}) {
+						continue
+					}
 
-						data, err := decodeSingleQR(qrImg)
-						if err != nil {
-							// If we fail on the first column, consider grid ended after previous rows.
-							if col == 0 {
-								// If we've already collected any data, end all processing.
-								if len(payload) > 0 {
-									return payload, qrCount, nil
-								}
-								// else give up on grid heuristic
-								rows = 0
-								cols = 0
-								break
+					data, err := decodeSingleQR(qrImg)
+					if err != nil {
+						// If we fail on the first column, consider grid ended after previous rows.
+						if col == 0 {
+							// If we've already collected any data, end all processing.
+							if len(payload) > 0 {
+								return payload, qrCount, nil
 							}
-							// Otherwise stop the current row.
+							// else give up on grid heuristic
+							rows = 0
+							cols = 0
 							break
 						}
-						if len(data) > 0 {
-							rowHasData = true
-							qrCount++
-							payload = append(payload, data...)
-						}
+						// Otherwise stop the current row.
+						break
 					}
-					if !rowHasData && len(payload) > 0 {
-						// Assume we've reached the bottom of the grid.
-						return payload, qrCount, nil
+					if len(data) > 0 {
+						rowHasData = true
+						qrCount++
+						payload = append(payload, data...)
 					}
 				}
-				if len(payload) > 0 {
+				if !rowHasData && len(payload) > 0 {
+					// Assume we've reached the bottom of the grid.
 					return payload, qrCount, nil
 				}
+			}
+			if len(payload) > 0 {
+				return payload, qrCount, nil
 			}
 		}
 	}
@@ -1024,3 +1018,248 @@ func saveGridDebugImage(inputPath string, src image.Image, tileCount int) error 
 			if qrH <= 0 {
 				qrH = pngSize
 			}
+
+			cols := 0
+			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
+				cols++
+			}
+			rows := 0
+			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
+				rows++
+			}
+			thickness := max(2, min(qrW, qrH)/40)
+			count := 0
+			for row := 0; row < rows; row++ {
+				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
+				for col := 0; col < cols; col++ {
+					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
+					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
+					drawRect(rgba, tileRect, green, thickness)
+					count++
+					if tileCount > 0 && count >= tileCount {
+						// Optional: stop after drawing number of decoded tiles.
+						// But generally drawing all tiles is more informative.
+					}
+				}
+			}
+		}
+	}
+
+	out := debugOutputPath(inputPath)
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, rgba)
+}
+
+func debugOutputPath(inputPath string) string {
+	dir := filepath.Dir(inputPath)
+	base := filepath.Base(inputPath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	return filepath.Join(dir, fmt.Sprintf("%s_debug.png", name))
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func decodeMode(inputPath string, outPath string) {
+	ext := strings.ToLower(filepath.Ext(inputPath))
+
+	// Forced mode handling
+	switch decodeModeFlag {
+	case "apng":
+		if ext != ".png" {
+			log.Fatalf("Forced mode=apng requires a .png file")
+		}
+		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			writeDecoded(data, outPath)
+			return
+		} else if err != nil {
+			log.Fatalf("APNG decode failed: %v", err)
+		} else {
+			log.Fatalf("APNG decode did not yield enough frames (nonMarker=%d qrs=%d)", nonMarker, qrCount)
+		}
+	case "grid":
+		// Open PNG and run grid heuristic
+		if ext != ".png" {
+			log.Fatalf("Forced mode=grid requires a .png file")
+		}
+		f, err := os.Open(inputPath)
+		if err != nil {
+			log.Fatalf("Failed to open image: %v", err)
+		}
+		defer f.Close()
+		img, err := png.Decode(f)
+		if err != nil {
+			log.Fatalf("Failed to decode PNG: %v", err)
+		}
+		data, count, err := decodeGridHeuristic(img)
+		if err != nil {
+			log.Fatalf("Grid decode failed: %v", err)
+		}
+		if debugMode {
+			if err := saveGridDebugImage(inputPath, img, count); err != nil {
+				log.Printf("debug: failed to save grid debug image: %v", err)
+			}
+		}
+		fmt.Printf("mode=decode format=grid qrs=%d\n", count)
+		writeDecoded(data, outPath)
+		return
+	case "photo":
+		// Decode as static image using photo path first
+		data, _, count, err := decodeStaticImageFile(inputPath)
+		if err != nil {
+			log.Fatalf("Photo decode failed: %v", err)
+		}
+		// Ensure we report as photo (even if fallback picked single); keep logging as photo
+		fmt.Printf("mode=decode format=photo qrs=%d\n", count)
+		writeDecoded(data, outPath)
+		return
+	case "single":
+		// Force single QR decode for any image type
+		// Open via PNG or JPEG
+		f, err := os.Open(inputPath)
+		if err != nil {
+			log.Fatalf("Failed to open image: %v", err)
+		}
+		defer f.Close()
+		ext2 := strings.ToLower(filepath.Ext(inputPath))
+		var img image.Image
+		if ext2 == ".png" {
+			img, err = png.Decode(f)
+		} else {
+			img, err = jpeg.Decode(f)
+		}
+		if err != nil {
+			log.Fatalf("Failed to decode image: %v", err)
+		}
+		payload, err := decodeSingleQR(img)
+		if err != nil {
+			log.Fatalf("Single decode failed: %v", err)
+		}
+		if debugMode {
+			if err := saveWholeImageBox(inputPath, img); err != nil {
+				log.Printf("debug: failed to save single debug image: %v", err)
+			}
+		}
+		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
+		writeDecoded(payload, outPath)
+		return
+	case "auto", "":
+		// proceed to auto flow below
+	default:
+		log.Fatalf("Invalid -decode-mode value: %s (valid: auto, apng, grid, photo, single)", decodeModeFlag)
+	}
+
+	// Auto-detection flow (existing behavior)
+	// For PNGs, try APNG first as before.
+	if ext == ".png" {
+		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
+			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			writeDecoded(data, outPath)
+			return
+		}
+		// Otherwise fall through to static image path.
+	}
+
+	// Static image decode path supports PNG and JPEG.
+	data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
+	if err != nil {
+		log.Fatalf("Decode failed: %v", err)
+	}
+	if fmtDetected == "" {
+		fmtDetected = "unknown"
+	}
+	fmt.Printf("mode=decode format=%s qrs=%d\n", fmtDetected, count)
+	writeDecoded(data, outPath)
+}
+
+func writeDecoded(data []byte, outPath string) {
+	var w io.Writer
+	if outPath == "" || outPath == "-" {
+		w = os.Stdout
+	} else {
+		f, err := os.Create(outPath)
+		if err != nil {
+			log.Fatalf("Failed to create output file %s: %v", outPath, err)
+		}
+		defer f.Close()
+		w = f
+	}
+	if _, err := w.Write(data); err != nil {
+		log.Fatalf("Failed to write decoded data: %v", err)
+	}
+	if outPath != "" && outPath != "-" {
+		fmt.Printf("Decoded %d bytes to %s\n", len(data), outPath)
+	}
+}
+
+func main() {
+	// Modes: encode (default) and decode
+	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
+	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
+	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
+	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
+	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
+	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
+	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
+	flag.Parse()
+
+	switch *mode {
+	case "encode":
+		// Validate chunk size.
+		if *chunkSize <= 0 {
+			log.Fatalf("Error: chunksize must be a positive number.")
+		}
+		// QR codes can hold up to 2953 bytes with the lowest error correction.
+		if *chunkSize > 2953 {
+			log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
+		}
+
+		// Validate delay.
+		if *delay <= 0 {
+			log.Fatalf("Error: delay must be a positive number.")
+		}
+		if *delay > 65535 {
+			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
+		}
+
+		// Require exactly one input file.
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputFilename := flag.Arg(0)
+		encodeMode(*format, *chunkSize, *delay, inputFilename)
+
+	case "decode":
+		// Require exactly one input file (the PNG/JPG/APNG to decode).
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputImage := flag.Arg(0)
+		decodeMode(inputImage, *outPath)
+
+	default:
+		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
+	}
+}
