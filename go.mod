@@ -1,4 +1,4 @@
-module github.com/oza6ut0ne/qrencode
+module github.com/oza6ut0ne/goqr
 
 go 1.24
 
