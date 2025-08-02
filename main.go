@@ -118,7 +118,7 @@ func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int,
 	fmt.Printf("\nSuccessfully created animated QR code %s.\n", outputFilename)
 }
 
-func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
+func encodeMode(format string, chunkSize int, delay int, inputFilename string, base64Mode bool) {
 	// 3. Read the entire input file into memory.
 	data, err := os.ReadFile(inputFilename)
 	if err != nil {
@@ -153,10 +153,12 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 		copy(buf[frameHeaderSize:], chunk)
 
 		// Base64-encode buffer to ASCII for QR encoding
-		b64 := base64.StdEncoding.EncodeToString(buf)
+		if base64Mode {
+			buf = []byte(base64.StdEncoding.EncodeToString(buf))
+		}
 
 		// Generate QR with gozxing at target size.
-		img, err := generateQRCodeImage([]byte(b64), pngSize)
+		img, err := generateQRCodeImage([]byte(buf), pngSize, base64Mode)
 		if err != nil {
 			log.Fatalf("Failed to generate QR code for frame %d: %v", frameIdx, err)
 		}
@@ -205,15 +207,20 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 }
 
 // generateQRCodeImage creates a QR code image of requested size using gozxing.
-func generateQRCodeImage(data []byte, size int) (image.Image, error) {
+func generateQRCodeImage(data []byte, size int, base64Mode bool) (image.Image, error) {
 	content := string(data)
 
 	// Prepare hints: Error correction level H (robust) and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
 	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_H
 	hints[gozxing.EncodeHintType_MARGIN] = 0
-	// Use ISO-8859-1 to preserve arbitrary binary data
-	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
+	if base64Mode {
+		// Use ISO-8859-1 to preserve arbitrary binary data
+		hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
+	} else {
+		// Use UTF-8 to preserve arbitrary binary data
+		hints[gozxing.EncodeHintType_CHARACTER_SET] = "UTF-8"
+	}
 
 	writer := qrcodewriter.NewQRCodeWriter()
 	bm, err := writer.Encode(content, gozxing.BarcodeFormat_QR_CODE, size, size, hints)
@@ -566,7 +573,9 @@ func cropMargins(src image.Image) image.Image {
 	maxX = min(b.Max.X, maxX+padX)
 	maxY = min(b.Max.Y, maxY+padY)
 
-	if s, ok := src.(interface{ SubImage(r image.Rectangle) image.Image }); ok {
+	if s, ok := src.(interface {
+		SubImage(r image.Rectangle) image.Image
+	}); ok {
 		return s.SubImage(image.Rect(minX, minY, maxX, maxY))
 	}
 	// Fallback: copy region
@@ -1320,10 +1329,11 @@ func main() {
 	// Modes: encode (default) and decode
 	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
 	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
-	chunkSize := flag.Int("chunksize", 896, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
+	chunkSize := flag.Int("chunksize", 768, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
 	delay := flag.Int("delay", 120, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
 	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
 	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
+	base64Mode := flag.Bool("base64", false, "Enable base64 encoding before encoding to QR images")
 	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
 	flag.Parse()
 
@@ -1354,7 +1364,7 @@ func main() {
 			os.Exit(1)
 		}
 		inputFilename := flag.Arg(0)
-		encodeMode(*format, *chunkSize, *delay, inputFilename)
+		encodeMode(*format, *chunkSize, *delay, inputFilename, *base64Mode)
 
 	case "decode":
 		// Require exactly one input file (the PNG/JPG/APNG to decode).
