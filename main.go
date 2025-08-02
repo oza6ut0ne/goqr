@@ -281,7 +281,6 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 	}
 
 	// sample every N pixels, scaling with size
-	stepX := max(4, width/64)
 	stepY := max(4, height/64)
 	var total, hits int
 	for y := b.Min.Y; y < b.Max.Y; y += stepY {
