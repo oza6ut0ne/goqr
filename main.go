@@ -262,21 +262,22 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	return symbols[idx].Payload, nil
 }
 
-// decodeAPNG decodes APNG and returns data and number of QR frames decoded.
-func decodeAPNG(path string) ([]byte, int, error) {
+// decodeAPNG decodes APNG and returns data, number of QR frames decoded, and number of non-marker frames.
+func decodeAPNG(path string) ([]byte, int, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer f.Close()
 
 	a, err := apng.DecodeAll(f)
 	if err != nil {
-		return nil, 0, fmt.Errorf("not an APNG or failed to decode APNG: %w", err)
+		return nil, 0, 0, fmt.Errorf("not an APNG or failed to decode APNG: %w", err)
 	}
 
 	var data []byte
 	qrCount := 0
+	nonMarkerFrames := 0
 	for _, fr := range a.Frames {
 		img := fr.Image
 		// Robustly skip marker frames (mostly red or mostly blue)
@@ -286,17 +287,19 @@ func decodeAPNG(path string) ([]byte, int, error) {
 			isSolidColor(img, color.RGBA{B: 0xff, A: 0xff}) {
 			continue
 		}
+		nonMarkerFrames++
 		b, err := decodeSingleQR(img)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to decode frame: %w", err)
+			// If a non-marker frame doesn't decode, keep scanning, but don't count it.
+			continue
 		}
 		qrCount++
 		data = append(data, b...)
 	}
-	if len(data) == 0 {
-		return nil, 0, errors.New("no data decoded from APNG frames")
+	if qrCount == 0 {
+		return nil, 0, nonMarkerFrames, errors.New("no data decoded from APNG frames")
 	}
-	return data, qrCount, nil
+	return data, qrCount, nonMarkerFrames, nil
 }
 
 func isWhite(pxR, pxG, pxB, pxA uint32) bool {
@@ -709,12 +712,13 @@ func decodeMode(inputPath string, outPath string) {
 	ext := strings.ToLower(filepath.Ext(inputPath))
 	// For PNGs, try APNG first as before.
 	if ext == ".png" {
-		if data, count, err := decodeAPNG(inputPath); err == nil {
-			fmt.Printf("mode=decode format=apng qrs=%d\n", count)
+		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
+			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
 			writeDecoded(data, outPath)
 			return
 		}
-		// If APNG path fails, continue to static image path below.
+		// Otherwise fall through to static image path.
 	}
 
 	// Static image decode path supports PNG and JPEG.
