@@ -1320,8 +1320,8 @@ func main() {
 	// Modes: encode (default) and decode
 	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
 	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
-	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
-	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
+	chunkSize := flag.Int("chunksize", 896, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
+	delay := flag.Int("delay", 120, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
 	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
 	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
 	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
