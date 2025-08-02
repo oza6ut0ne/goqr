@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/kettek/apng"
 	"github.com/liyue201/goqr"
@@ -409,24 +411,65 @@ func decodePhotoLike(img image.Image) ([]byte, error) {
 	return out, nil
 }
 
-func decodeGridOrSinglePNG(path string) ([]byte, error) {
-	// Open as basic PNG image (single frame).
+func decodeStaticImageFile(path string) ([]byte, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	// Open file
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	img, err := png.Decode(f)
+
+	var img image.Image
+	switch ext {
+	case ".png":
+		// Try decode as PNG first (may be static PNG). APNG is handled elsewhere.
+		img, err = png.Decode(f)
+	case ".jpg", ".jpeg":
+		img, err = jpeg.Decode(f)
+	default:
+		// Try PNG, then JPEG as a fallback based on sniffer
+		if img, err = png.Decode(f); err != nil {
+			// Re-open to reset reader
+			_ = f.Close()
+			f2, err2 := os.Open(path)
+			if err2 != nil {
+				return nil, err2
+			}
+			defer f2.Close()
+			img, err = jpeg.Decode(f2)
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode PNG: %w", err)
+		return nil, fmt.Errorf("failed to decode image %s: %w", path, err)
 	}
 
-	// First attempt: robust photo-like detection for single or multiple QRs.
+	// Robust photo-like detection for single or multiple QRs (works for PNG or JPEG).
 	if data, err := decodePhotoLike(img); err == nil {
 		return data, nil
 	}
 
-	// Fallback to the older grid heuristic for perfectly generated grids.
+	// If PNG, we can try the exact grid heuristic as a last resort (for generated grids).
+	if ext == ".png" {
+		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
+		ff, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer ff.Close()
+		pimg, err := png.Decode(ff)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
+		}
+		return decodeGridHeuristic(pimg)
+	}
+
+	// For JPEG, no grid heuristic; return the original error.
+	return nil, errors.New("failed to decode QR(s) from image")
+}
+
+// The previous grid heuristic, refactored to accept an already-decoded image.
+func decodeGridHeuristic(img image.Image) ([]byte, error) {
 	// Try grid extraction first using known layout (white bg, padding = gridPadding).
 	b := img.Bounds()
 	bg := img.At(b.Min.X, b.Min.Y)
@@ -544,7 +587,7 @@ func decodeGridOrSinglePNG(path string) ([]byte, error) {
 								if len(payload) > 0 {
 									return payload, nil
 								}
-								// else continue trying single QR fallback below
+								// else give up on grid heuristic
 								rows = 0
 								cols = 0
 								break
@@ -581,19 +624,21 @@ func min(a, b int) int {
 }
 
 func decodeMode(inputPath string, outPath string) {
-	// First attempt APNG decode (multi-frame).
-	data, err := decodeAPNG(inputPath)
-	if err != nil {
-		// If APNG failed, attempt single/grid PNG decode.
-		data, err = decodeGridOrSinglePNG(inputPath)
-		if err != nil {
-			log.Fatalf("Decode failed: %v", err)
+	ext := strings.ToLower(filepath.Ext(inputPath))
+	// For PNGs, try APNG first as before.
+	if ext == ".png" {
+		if data, err := decodeAPNG(inputPath); err == nil {
+			writeDecoded(data, outPath)
+			return
 		}
-		// success with grid/single
-		writeDecoded(data, outPath)
-		return
+		// If APNG path fails, continue to static image path below.
 	}
-	// success with APNG
+
+	// Static image decode path supports PNG and JPEG.
+	data, err := decodeStaticImageFile(inputPath)
+	if err != nil {
+		log.Fatalf("Decode failed: %v", err)
+	}
 	writeDecoded(data, outPath)
 }
 
@@ -655,9 +700,9 @@ func main() {
 		encodeMode(*format, *chunkSize, *delay, inputFilename)
 
 	case "decode":
-		// Require exactly one input file (the PNG/APNG to decode).
+		// Require exactly one input file (the PNG/JPG/APNG to decode).
 		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.png>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
 			flag.PrintDefaults()
 			os.Exit(1)
 		}
