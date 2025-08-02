@@ -14,7 +14,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/kettek/apng"
 	"github.com/liyue201/goqr"
@@ -196,17 +195,16 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	if len(symbols) == 0 {
 		return nil, errors.New("no QR code found")
 	}
-	// If more than one, pick the largest by area.
-	if len(symbols) > 1 {
-		sort.Slice(symbols, func(i, j int) bool {
-			ri := symbols[i].Bounds()
-			rj := symbols[j].Bounds()
-			ai := ri.Dx() * ri.Dy()
-			aj := rj.Dx() * rj.Dy()
-			return ai > aj
-		})
+	// If more than one, pick the one with the longest payload to reduce chance of picking a small artifact.
+	idx := 0
+	maxLen := len(symbols[0].Payload)
+	for i := 1; i < len(symbols); i++ {
+		if l := len(symbols[i].Payload); l > maxLen {
+			maxLen = l
+			idx = i
+		}
 	}
-	return symbols[0].Payload, nil
+	return symbols[idx].Payload, nil
 }
 
 func decodeAPNG(path string) ([]byte, error) {
