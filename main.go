@@ -16,11 +16,6 @@ import (
 	"github.com/skip2/go-qrcode"
 )
 
-// The maximum number of bytes to encode in a single QR code.
-// QR codes can hold up to 2953 bytes with the lowest error correction.
-// We use a smaller chunk size to be safe and allow for higher error correction levels.
-const chunkSize = 2048
-
 // The size of the generated PNG image in pixels.
 const pngSize = 512
 
@@ -101,7 +96,17 @@ func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int)
 func main() {
 	// 1. Define and parse command-line flags.
 	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image.")
+	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame.")
 	flag.Parse()
+
+	// Validate chunk size.
+	if *chunkSize <= 0 {
+		log.Fatalf("Error: chunksize must be a positive number.")
+	}
+	// QR codes can hold up to 2953 bytes with the lowest error correction.
+	if *chunkSize > 2953 {
+		log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
+	}
 
 	// 2. Check for a single command-line argument for the input file.
 	if len(flag.Args()) != 1 {
@@ -123,8 +128,8 @@ func main() {
 
 	// 4. Generate QR codes for each chunk and store them in memory as images.
 	var images []image.Image
-	for i := 0; i < len(data); i += chunkSize {
-		end := i + chunkSize
+	for i := 0; i < len(data); i += *chunkSize {
+		end := i + *chunkSize
 		if end > len(data) {
 			end = len(data)
 		}
