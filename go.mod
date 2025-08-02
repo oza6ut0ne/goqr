@@ -1,4 +1,4 @@
-module example.com/myproject
+module github.com/oza6ut0ne/qrencode
 
 go 1.21
 
