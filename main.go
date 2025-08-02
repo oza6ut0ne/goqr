@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,9 +22,9 @@ import (
 
 	// gozxing imports
 	"github.com/makiuchi-d/gozxing"
-	"github.com/makiuchi-d/gozxing/qrcode/decoder"
-	qrcodewriter "github.com/makiuchi-d/gozxing/qrcode"
 	"github.com/makiuchi-d/gozxing/multi/qrcode"
+	qrcodewriter "github.com/makiuchi-d/gozxing/qrcode"
+	"github.com/makiuchi-d/gozxing/qrcode/decoder"
 )
 
 // The size of the generated PNG image in pixels.
@@ -31,6 +32,12 @@ const pngSize = 512
 
 // Padding used in grid generation between QR codes and around the border.
 const gridPadding = 20
+
+// 64-bit (8 bytes) header:
+// bytes 0..3: frame index (uint32 BE)
+// bytes 4..7: total frames (uint32 BE)
+const frameHeaderBits = 64
+const frameHeaderSize = 8
 
 // Global flag to control debug output
 var debugMode bool
@@ -118,22 +125,36 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 	}
 
 	if len(data) == 0 {
-		log.Fatalf("Input file %s is empty.", inputFilename, err)
+		log.Fatalf("Input file %s is empty.", inputFilename)
 	}
+
+	// Account for 8-byte header per frame.
+	if chunkSize <= frameHeaderSize {
+		log.Fatalf("chunksize must be greater than %d (header size)", frameHeaderSize)
+	}
+	payloadPerFrame := chunkSize - frameHeaderSize
+	totalFrames := int((len(data) + payloadPerFrame - 1) / payloadPerFrame)
 
 	// 4. Generate QR codes for each chunk and store them in memory as images.
 	var images []image.Image
-	for i := 0; i < len(data); i += chunkSize {
-		end := i + chunkSize
+	for frameIdx := 0; frameIdx < totalFrames; frameIdx++ {
+		start := frameIdx * payloadPerFrame
+		end := start + payloadPerFrame
 		if end > len(data) {
 			end = len(data)
 		}
-		chunk := data[i:end]
+		chunk := data[start:end]
+
+		// Build 8-byte header + chunk
+		buf := make([]byte, frameHeaderSize+len(chunk))
+		binary.BigEndian.PutUint32(buf[0:4], uint32(frameIdx))
+		binary.BigEndian.PutUint32(buf[4:8], uint32(totalFrames))
+		copy(buf[frameHeaderSize:], chunk)
 
 		// Generate QR with gozxing at target size.
-		img, err := generateQRCodeImage(chunk, pngSize)
+		img, err := generateQRCodeImage(buf, pngSize)
 		if err != nil {
-			log.Fatalf("Failed to generate QR code for chunk starting at byte %d: %v", i, err)
+			log.Fatalf("Failed to generate QR code for frame %d: %v", frameIdx, err)
 		}
 
 		images = append(images, img)
@@ -183,11 +204,11 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 func generateQRCodeImage(data []byte, size int) (image.Image, error) {
 	content := string(data)
 
-	// Prepare hints: Error correction level M and margin 0
+	// Prepare hints: Error correction level H (robust) and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
 	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_H
 	hints[gozxing.EncodeHintType_MARGIN] = 0
-	// Optional: specify character set to ensure binary survives (ISO-8859-1)
+	// Use ISO-8859-1 to preserve arbitrary binary data
 	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
 
 	writer := qrcodewriter.NewQRCodeWriter()
@@ -264,7 +285,7 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 	stepY := max(4, height/64)
 	var total, hits int
 	for y := b.Min.Y; y < b.Max.Y; y += stepY {
-		for x := b.Min.X; x < b.Max.X; x += stepX {
+		for x := b.Min.X; x < b.Max.X; x++ {
 			total++
 			if nearColor(img.At(x, y), target, tol) {
 				hits++
@@ -281,37 +302,87 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	src := gozxing.NewLuminanceSourceFromImage(img)
 
-	bmp, err := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
-	if err != nil {
-		return nil, err
+	// Try Hybrid first, then Global
+	{
+		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
+		if err == nil {
+			reader := qrcode.NewQRCodeMultiReader()
+			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
+				sort.Slice(results, func(i, j int) bool {
+					return len(results[i].GetText()) > len(results[j].GetText())
+				})
+				return []byte(results[0].GetText()), nil
+			}
+		}
 	}
-	reader := qrcode.NewQRCodeMultiReader()
-	results, err := reader.DecodeMultiple(bmp, nil)
-	if err == nil && len(results) > 0 {
-		// Choose the longest payload
-		sort.Slice(results, func(i, j int) bool {
-			return len(results[i].GetText()) > len(results[j].GetText())
-		})
-		return []byte(results[0].GetText()), nil
-	}
-
-	// Fallback to HybridBinarizer
-	bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
-	if err2 != nil {
-		return nil, err2
-	}
-	results2, err2 := reader.DecodeMultiple(bmp2, nil)
-	if err2 == nil && len(results2) > 0 {
-		sort.Slice(results2, func(i, j int) bool {
-			return len(results2[i].GetText()) > len(results2[j].GetText())
-		})
-		return []byte(results2[0].GetText()), nil
+	{
+		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
+		if err == nil {
+			reader := qrcode.NewQRCodeMultiReader()
+			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
+				sort.Slice(results, func(i, j int) bool {
+					return len(results[i].GetText()) > len(results[j].GetText())
+				})
+				return []byte(results[0].GetText()), nil
+			}
+		}
 	}
 
 	return nil, errors.New("no QR code found")
 }
 
-// decodeAPNG decodes APNG and returns data, number of QR frames decoded, and number of non-marker frames.
+// 8-byte header parsing: return payload (without header), index, total.
+func parseFrameHeader8(frame []byte) (payload []byte, idx int, total int, err error) {
+	if len(frame) < frameHeaderSize {
+		return nil, 0, 0, errors.New("frame too small for 8-byte header")
+	}
+	idx32 := binary.BigEndian.Uint32(frame[0:4])
+	total32 := binary.BigEndian.Uint32(frame[4:8])
+	if total32 == 0 {
+		return nil, 0, 0, errors.New("invalid total frames in 8-byte header")
+	}
+	return frame[8:], int(idx32), int(total32), nil
+}
+
+// Reassemble frames using 8-byte headers. If headers are missing and only one frame is present, return it as-is.
+func reassembleFrames(frames [][]byte) ([]byte, int, error) {
+	if len(frames) == 0 {
+		return nil, 0, errors.New("no frames")
+	}
+	type fInfo struct {
+		idx   int
+		total int
+		data  []byte
+	}
+	parsed := make([]fInfo, 0, len(frames))
+	for _, fr := range frames {
+		p, idx, tot, err := parseFrameHeader8(fr)
+		if err != nil {
+			if len(frames) == 1 {
+				// Backward compatibility: single frame without header
+				return fr, 1, nil
+			}
+			return nil, 0, fmt.Errorf("bad frame header: %w", err)
+		}
+		parsed = append(parsed, fInfo{idx: idx, total: tot, data: p})
+	}
+	// Validate totals
+	expected := parsed[0].total
+	for _, f := range parsed {
+		if f.total != expected {
+			return nil, 0, errors.New("inconsistent total frames across frames")
+		}
+	}
+	// Sort and concat
+	sort.Slice(parsed, func(i, j int) bool { return parsed[i].idx < parsed[j].idx })
+	var out []byte
+	for _, f := range parsed {
+		out = append(out, f.data...)
+	}
+	return out, expected, nil
+}
+
+// decodeAPNG decodes APNG and returns data, number of QR frames decoded (total), and number of non-marker frames.
 func decodeAPNG(path string) ([]byte, int, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -324,7 +395,7 @@ func decodeAPNG(path string) ([]byte, int, int, error) {
 		return nil, 0, 0, fmt.Errorf("not an APNG or failed to decode APNG: %w", err)
 	}
 
-	var data []byte
+	var frames [][]byte
 	qrCount := 0
 	nonMarkerFrames := 0
 	for _, fr := range a.Frames {
@@ -332,23 +403,26 @@ func decodeAPNG(path string) ([]byte, int, int, error) {
 		// Robustly skip marker frames (mostly red or mostly blue)
 		if isMostlyColor(img, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
 			isMostlyColor(img, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
-			isSolidColor(img, color.RGBA{R: 0xff, A: 0xff}) || // keep strict as fast-path
+			isSolidColor(img, color.RGBA{R: 0xff, A: 0xff}) ||
 			isSolidColor(img, color.RGBA{B: 0xff, A: 0xff}) {
 			continue
 		}
 		nonMarkerFrames++
 		b, err := decodeSingleQR(img)
 		if err != nil {
-			// If a non-marker frame doesn't decode, keep scanning, but don't count it.
 			continue
 		}
 		qrCount++
-		data = append(data, b...)
+		frames = append(frames, b)
 	}
 	if qrCount == 0 {
 		return nil, 0, nonMarkerFrames, errors.New("no data decoded from APNG frames")
 	}
-	return data, qrCount, nonMarkerFrames, nil
+	data, total, err := reassembleFrames(frames)
+	if err != nil {
+		return nil, 0, nonMarkerFrames, err
+	}
+	return data, total, nonMarkerFrames, nil
 }
 
 func isWhite(pxR, pxG, pxB, pxA uint32) bool {
@@ -398,11 +472,9 @@ func boostContrast(src image.Image) image.Image {
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			r, g, bl, a := src.At(x, y).RGBA()
-			// normalize to [0..255]
 			r8 := uint8(r >> 8)
 			g8 := uint8(g >> 8)
 			b8 := uint8(bl >> 8)
-			// simple contrast around 128 with factor 1.5
 			apply := func(v uint8) uint8 {
 				f := float64(v)
 				f = (f-128)*1.5 + 128
@@ -438,7 +510,6 @@ func grayscale(src image.Image) image.Image {
 }
 
 // cropMargins tries to detect and crop uniform background margins to tighten the content area.
-// It assumes background is close to white and content contains darker pixels.
 func cropMargins(src image.Image) image.Image {
 	b := src.Bounds()
 	minX, minY := b.Max.X, b.Max.Y
@@ -492,8 +563,7 @@ func cropMargins(src image.Image) image.Image {
 	return dst
 }
 
-// detectAllQRCodes tries to detect QR codes in the given image with multiple attempts using gozxing.
-// For photo inputs (grid photos), we aggressively preprocess and attempt multiple rotations.
+// detectAllQRCodes tries multiple preprocess/rotation variants and returns raw decoded payloads (as bytes).
 func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	var variants []image.Image
 
@@ -510,7 +580,6 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 		r270 := rotate270(im)
 		variants = append(variants, r90, r180, r270)
 	}
-	// Create rotations for key variants
 	makeRotations(img)
 	makeRotations(cropMargins(img))
 	makeRotations(boostContrast(img))
@@ -518,11 +587,9 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	reader := qrcode.NewQRCodeMultiReader()
 	for _, im := range variants {
 		src := gozxing.NewLuminanceSourceFromImage(im)
-		// Try hybrid first
-		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
-		if err == nil {
-			results, err := reader.DecodeMultiple(bmp, nil)
-			if err == nil && len(results) > 0 {
+		// Try Hybrid first
+		if bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src)); err == nil {
+			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
 				var payloads [][]byte
 				for _, r := range results {
 					payloads = append(payloads, []byte(r.GetText()))
@@ -530,11 +597,9 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 				return payloads, nil
 			}
 		}
-		// Fallback: global histogram
-		bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
-		if err2 == nil {
-			results2, err2 := reader.DecodeMultiple(bmp2, nil)
-			if err2 == nil && len(results2) > 0 {
+		// Fallback: Global Histogram
+		if bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src)); err2 == nil {
+			if results2, err2 := reader.DecodeMultiple(bmp2, nil); err2 == nil && len(results2) > 0 {
 				var payloads [][]byte
 				for _, r := range results2 {
 					payloads = append(payloads, []byte(r.GetText()))
@@ -547,8 +612,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	return nil, errors.New("no QR codes detected")
 }
 
-// orderPayloadsForGrid attempts to order multiple decoded payloads conservatively.
-// With no geometry, we simply keep as-is but prefer longer payloads first.
+// orderPayloadsForGrid attempts to order multiple decoded payloads conservatively (longer first).
 func orderPayloadsForGrid(payloads [][]byte) [][]byte {
 	sort.SliceStable(payloads, func(i, j int) bool {
 		return len(payloads[i]) > len(payloads[j])
@@ -556,133 +620,17 @@ func orderPayloadsForGrid(payloads [][]byte) [][]byte {
 	return payloads
 }
 
-func decodePhotoLike(img image.Image) ([]byte, int, error) {
-	payloads, err := detectAllQRCodes(img)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(payloads) == 1 {
-		return payloads[0], 1, nil
-	}
-	ordered := orderPayloadsForGrid(payloads)
-	var out []byte
-	for _, p := range ordered {
-		out = append(out, p...)
-	}
-	return out, len(ordered), nil
-}
-
-// drawSymbolsDebug: we don't have geometry from gozxing via MultiReader in this code,
-// so we infer a likely grid overlay and draw boxes at estimated tile positions (same as before).
 func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) error {
-	// Attempt to infer a grid overlay similar to decodeGridHeuristic
+	// For now, we just draw a green rectangle over the whole image when background isn't white.
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
 
-	// Try detect white background to infer grid padding/tiles; otherwise draw whole image box.
 	bg := src.At(b.Min.X, b.Min.Y)
 	r, g, bl, a := bg.RGBA()
 	if !(uint8(r>>8) == 0xff && uint8(g>>8) == 0xff && uint8(bl>>8) == 0xff && uint8(a>>8) == 0xff) {
 		drawRect(rgba, b, green, max(2, b.Dx()/200))
-		out := debugOutputPath(inputPath)
-		f, err := os.Create(out)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		return png.Encode(f, rgba)
-	}
-
-	// Reuse the probing logic from grid heuristic to estimate first tile size.
-	startY := b.Min.Y + gridPadding
-	startX := b.Min.X + gridPadding
-	found := false
-	var qrStartX, qrStartY int
-	maxProbe := gridPadding + 16
-	for yy := startY; yy < startY+maxProbe && yy < b.Max.Y; yy++ {
-		for xx := startX; xx < startX+maxProbe && xx < b.Max.X; xx++ {
-			rr, gg, bb, aa := src.At(xx, yy).RGBA()
-			if !isWhite(rr, gg, bb, aa) {
-				qrStartX = xx
-				qrStartY = yy
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-
-	if !found {
-		drawRect(rgba, b, green, max(2, b.Dx()/200))
-		out := debugOutputPath(inputPath)
-		f, err := os.Create(out)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		return png.Encode(f, rgba)
-	}
-
-	whiteRun := 0
-	qrW := 0
-	tolerance := 5
-	yScan := qrStartY
-	for x := qrStartX; x < b.Max.X; x++ {
-		rr, gg, bb, aa := src.At(x, yScan).RGBA()
-		if isWhite(rr, gg, bb, aa) {
-			whiteRun++
-			if whiteRun > tolerance {
-				qrW = x - qrStartX - whiteRun + 1
-				break
-			}
-		} else {
-			whiteRun = 0
-		}
-	}
-	if qrW <= 0 {
-		qrW = max(32, b.Dx()/8)
-	}
-	whiteRun = 0
-	qrH := 0
-	xScan := qrStartX
-	for y := qrStartY; y < b.Max.Y; y++ {
-		rr, gg, bb, aa := src.At(xScan, y).RGBA()
-		if isWhite(rr, gg, bb, aa) {
-			whiteRun++
-			if whiteRun > tolerance {
-				qrH = y - qrStartY - whiteRun + 1
-				break
-			}
-		} else {
-			whiteRun = 0
-		}
-	}
-	if qrH <= 0 {
-		qrH = qrW
-	}
-
-	// Draw an overlay grid based on estimated tile size and known padding
-	cols := 0
-	for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
-		cols++
-	}
-	rows := 0
-	for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
-		rows++
-	}
-
-	thickness := max(2, min(qrW, qrH)/40)
-	for row := 0; row < rows; row++ {
-		yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
-		for col := 0; col < cols; col++ {
-			xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
-			tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
-			drawRect(rgba, tileRect, green, thickness)
-		}
 	}
 
 	out := debugOutputPath(inputPath)
@@ -706,14 +654,11 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	var img image.Image
 	switch ext {
 	case ".png":
-		// Try decode as PNG first (may be static PNG). APNG is handled elsewhere.
 		img, err = png.Decode(f)
 	case ".jpg", ".jpeg":
 		img, err = jpeg.Decode(f)
 	default:
-		// Try PNG, then JPEG as a fallback based on sniffer
 		if img, err = png.Decode(f); err != nil {
-			// Re-open to reset reader
 			_ = f.Close()
 			f2, err2 := os.Open(path)
 			if err2 != nil {
@@ -730,21 +675,19 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	// Photo-like robust multi-QR decode (assumes a photographed grid)
 	if payloads, err := detectAllQRCodes(img); err == nil && len(payloads) > 0 {
 		ordered := orderPayloadsForGrid(payloads)
-		var out []byte
-		for _, p := range ordered {
-			out = append(out, p...)
-		}
-		if debugMode {
-			if err := drawSymbolsDebug(path, img, ordered); err != nil {
-				log.Printf("debug: failed to save photo debug image: %v", err)
+		data, total, err := reassembleFrames(ordered)
+		if err == nil {
+			if debugMode {
+				if err := drawSymbolsDebug(path, img, ordered); err != nil {
+					log.Printf("debug: failed to save photo debug image: %v", err)
+				}
 			}
+			return data, "photo", total, nil
 		}
-		return out, "photo", len(ordered), nil
 	}
 
 	// If PNG, try exact grid heuristic as last resort (for generated grids).
 	if ext == ".png" {
-		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
 		ff, err := os.Open(path)
 		if err != nil {
 			return nil, "", 0, err
@@ -756,7 +699,6 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 		}
 		data, count, err := decodeGridHeuristic(pimg)
 		if err == nil {
-			// For grid heuristic, draw rectangles where we decoded tiles.
 			if debugMode {
 				if err := saveGridDebugImage(path, pimg, count); err != nil {
 					log.Printf("debug: failed to save grid debug image: %v", err)
@@ -768,7 +710,10 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 
 	// As a final fallback, try single QR on the whole image.
 	if payload, err := decodeSingleQR(img); err == nil {
-		// Single QR: draw a border around the whole image as a coarse indication.
+		// Try stripping 8-byte header if present.
+		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
+			payload = p
+		}
 		if debugMode {
 			if err := saveWholeImageBox(path, img); err != nil {
 				log.Printf("debug: failed to save single debug image: %v", err)
@@ -777,12 +722,11 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 		return payload, "single", 1, nil
 	}
 
-	// For JPEG, no grid heuristic; return the original error.
 	return nil, "", 0, errors.New("failed to decode QR(s) from image")
 }
 
 // The previous grid heuristic, refactored to accept an already-decoded image.
-// Returns data and number of tiles decoded.
+// Returns data and number of tiles decoded (interpreted as total frames if headers present).
 func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 	// Try grid extraction first using known layout (white bg, padding = gridPadding).
 	b := img.Bounds()
@@ -813,7 +757,7 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 		}
 
 		if found {
-			// Measure QR width: from qrStartX scan right until we see a run of whites > tolerance.
+			// Measure QR width
 			whiteRun := 0
 			qrW := 0
 			tolerance := 3
@@ -831,11 +775,10 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				}
 			}
 			if qrW <= 0 {
-				// Fallback: approximate width up to next padding
-				qrW = pngSize // safe upper bound; will be bounded by image later
+				qrW = pngSize
 			}
 
-			// Measure QR height similarly.
+			// Measure QR height
 			whiteRun = 0
 			qrH := 0
 			xScan := qrStartX
@@ -855,10 +798,7 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				qrH = pngSize
 			}
 
-			// Iterate tiles row-major using measured qrW/qrH and known padding.
-			var payload []byte
-			qrCount := 0
-			// Use SubImage
+			var frames [][]byte
 			sub, ok := img.(interface {
 				SubImage(r image.Rectangle) image.Image
 			})
@@ -866,7 +806,6 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				return nil, 0, errors.New("image type does not support SubImage")
 			}
 
-			// Number of columns/rows estimated from canvas size.
 			cols := 0
 			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
 				cols++
@@ -876,7 +815,6 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				rows++
 			}
 
-			// Decode each tile; stop a row when decoding fails entirely (assume trailing empties).
 			for row := 0; row < rows; row++ {
 				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
 				rowHasData := false
@@ -895,33 +833,30 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 
 					data, err := decodeSingleQR(qrImg)
 					if err != nil {
-						// If we fail on the first column, consider grid ended after previous rows.
 						if col == 0 {
-							// If we've already collected any data, end all processing.
-							if len(payload) > 0 {
-								return payload, qrCount, nil
+							if len(frames) > 0 {
+								out, total, err := reassembleFrames(frames)
+								return out, total, err
 							}
-							// else give up on grid heuristic
 							rows = 0
 							cols = 0
 							break
 						}
-						// Otherwise stop the current row.
 						break
 					}
 					if len(data) > 0 {
 						rowHasData = true
-						qrCount++
-						payload = append(payload, data...)
+						frames = append(frames, data)
 					}
 				}
-				if !rowHasData && len(payload) > 0 {
-					// Assume we've reached the bottom of the grid.
-					return payload, qrCount, nil
+				if !rowHasData && len(frames) > 0 {
+					out, total, err := reassembleFrames(frames)
+					return out, total, err
 				}
 			}
-			if len(payload) > 0 {
-				return payload, qrCount, nil
+			if len(frames) > 0 {
+				out, total, err := reassembleFrames(frames)
+				return out, total, err
 			}
 		}
 	}
@@ -930,6 +865,10 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 	payload, err := decodeSingleQR(img)
 	if err != nil {
 		return nil, 0, err
+	}
+	// Strip header if present
+	if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
+		payload = p
 	}
 	return payload, 1, nil
 }
@@ -981,107 +920,14 @@ func saveWholeImageBox(inputPath string, src image.Image) error {
 }
 
 // saveGridDebugImage draws green rectangles on grid tiles that decoded successfully.
-// Since we do not store tile rectangles during decode, we re-run the grid tiling to draw all candidate tiles,
-// marking all tile positions; this provides a visual grid overlay matching the decode heuristic.
 func saveGridDebugImage(inputPath string, src image.Image, tileCount int) error {
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
 
-	// Recreate grid layout similarly to decodeGridHeuristic to determine tile rects.
-	bg := src.At(b.Min.X, b.Min.Y)
-	r, g, bl, a := bg.RGBA()
-	if !isWhite(r, g, bl, a) {
-		// If not white background, just draw a whole-image box.
-		drawRect(rgba, b, green, max(2, b.Dx()/200))
-	} else {
-		startY := b.Min.Y + gridPadding
-		startX := b.Min.X + gridPadding
-		found := false
-		var qrStartX, qrStartY int
-		maxProbe := gridPadding + 8
-		for yy := startY; yy < startY+maxProbe && yy < b.Max.Y; yy++ {
-			for xx := startX; xx < startX+maxProbe && xx < b.Max.X; xx++ {
-				rr, gg, bb, aa := src.At(xx, yy).RGBA()
-				if !isWhite(rr, gg, bb, aa) {
-					qrStartX = xx
-					qrStartY = yy
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
-		}
-		if !found {
-			drawRect(rgba, b, green, max(2, b.Dx()/200))
-		} else {
-			// measure widths/heights same as decodeGridHeuristic
-			whiteRun := 0
-			qrW := 0
-			tolerance := 3
-			yScan := qrStartY
-			for x := qrStartX; x < b.Max.X; x++ {
-				rr, gg, bb, aa := src.At(x, yScan).RGBA()
-				if isWhite(rr, gg, bb, aa) {
-					whiteRun++
-					if whiteRun > tolerance {
-						qrW = x - qrStartX - whiteRun + 1
-						break
-					}
-				} else {
-					whiteRun = 0
-				}
-			}
-			if qrW <= 0 {
-				qrW = pngSize
-			}
-			whiteRun = 0
-			qrH := 0
-			xScan := qrStartX
-			for y := qrStartY; y < b.Max.Y; y++ {
-				rr, gg, bb, aa := src.At(xScan, y).RGBA()
-				if isWhite(rr, gg, bb, aa) {
-					whiteRun++
-					if whiteRun > tolerance {
-						qrH = y - qrStartY - whiteRun + 1
-						break
-					}
-				} else {
-					whiteRun = 0
-				}
-			}
-			if qrH <= 0 {
-				qrH = pngSize
-			}
-
-			cols := 0
-			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
-				cols++
-			}
-			rows := 0
-			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
-				rows++
-			}
-			thickness := max(2, min(qrW, qrH)/40)
-			count := 0
-			for row := 0; row < rows; row++ {
-				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
-				for col := 0; col < cols; col++ {
-					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
-					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
-					drawRect(rgba, tileRect, green, thickness)
-					count++
-					if tileCount > 0 && count >= tileCount {
-						// Optional: stop after drawing number of decoded tiles.
-						// But generally drawing all tiles is more informative.
-					}
-				}
-			}
-		}
-	}
+	// For simplicity, just draw a whole-image box here.
+	drawRect(rgba, b, green, max(2, b.Dx()/200))
 
 	out := debugOutputPath(inputPath)
 	f, err := os.Create(out)
@@ -1190,6 +1036,10 @@ func decodeMode(inputPath string, outPath string) {
 		if err != nil {
 			log.Fatalf("Single decode failed: %v", err)
 		}
+		// Strip 8-byte header if present
+		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
+			payload = p
+		}
 		if debugMode {
 			if err := saveWholeImageBox(inputPath, img); err != nil {
 				log.Printf("debug: failed to save single debug image: %v", err)
@@ -1262,11 +1112,10 @@ func main() {
 	switch *mode {
 	case "encode":
 		// Validate chunk size.
-		if *chunkSize <= 0 {
-			log.Fatalf("Error: chunksize must be a positive number.")
+		if *chunkSize <= frameHeaderSize {
+			log.Fatalf("Error: chunksize must be greater than %d.", frameHeaderSize)
 		}
-		// QR codes can hold up to ~2953 bytes at low error correction in theory,
-		// but actual capacity varies. We warn for very large chunk sizes.
+		// QR codes can hold up to ~2953 bytes at low EC; actual capacity varies.
 		infCapWarn := 4096
 		if *chunkSize > infCapWarn {
 			log.Printf("Warning: chunksize %d is quite large; encoding may fail for some data.", *chunkSize)
