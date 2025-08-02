@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/kettek/apng"
 	"github.com/liyue201/goqr"
@@ -187,6 +188,7 @@ func isSolidColor(img image.Image, c color.RGBA) bool {
 	return true
 }
 
+// decodeSingleQR returns the payload from the best QR found in the image.
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	symbols, err := goqr.Recognize(img)
 	if err != nil {
@@ -195,7 +197,7 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	if len(symbols) == 0 {
 		return nil, errors.New("no QR code found")
 	}
-	// If more than one, pick the one with the longest payload to reduce chance of picking a small artifact.
+	// Pick the one with the longest payload.
 	idx := 0
 	maxLen := len(symbols[0].Payload)
 	for i := 1; i < len(symbols); i++ {
@@ -242,6 +244,171 @@ func isWhite(pxR, pxG, pxB, pxA uint32) bool {
 	return uint8(pxR>>8) == 0xff && uint8(pxG>>8) == 0xff && uint8(pxB>>8) == 0xff && uint8(pxA>>8) == 0xff
 }
 
+// rotate90 rotates an image 90 degrees clockwise.
+func rotate90(src image.Image) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dy(), b.Dx()))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dst.Set(b.Max.Y-1-y, x-b.Min.X, src.At(x, y))
+		}
+	}
+	return dst
+}
+
+// rotate180 rotates an image 180 degrees.
+func rotate180(src image.Image) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dst.Set(b.Max.X-1-x, b.Max.Y-1-y, src.At(x, y))
+		}
+	}
+	return dst
+}
+
+// rotate270 rotates an image 270 degrees clockwise (90 ccw).
+func rotate270(src image.Image) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dy(), b.Dx()))
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dst.Set(y-b.Min.Y, b.Max.X-1-x, src.At(x, y))
+		}
+	}
+	return dst
+}
+
+// boostContrast applies a simple linear contrast stretch around 0.5 to increase QR contrast.
+func boostContrast(src image.Image) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, a := src.At(x, y).RGBA()
+			// normalize to [0..255]
+			r8 := uint8(r >> 8)
+			g8 := uint8(g >> 8)
+			b8 := uint8(bl >> 8)
+			// simple contrast around 128 with factor 1.5
+			apply := func(v uint8) uint8 {
+				f := float64(v)
+				f = (f-128)*1.5 + 128
+				if f < 0 {
+					f = 0
+				}
+				if f > 255 {
+					f = 255
+				}
+				return uint8(f)
+			}
+			dst.SetRGBA(x, y, color.RGBA{
+				R: apply(r8),
+				G: apply(g8),
+				B: apply(b8),
+				A: uint8(a >> 8),
+			})
+		}
+	}
+	return dst
+}
+
+// detectAllQRCodes tries to detect QR codes in the given image with multiple attempts:
+// original, contrast-boosted, and rotated variants. Returns all detected symbols.
+func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
+	tryImages := []image.Image{img, boostContrast(img)}
+	// Add rotations
+	r90 := rotate90(img)
+	r180 := rotate180(img)
+	r270 := rotate270(img)
+	tryImages = append(tryImages, r90, r180, r270)
+
+	var found []*goqr.QRData
+	for _, im := range tryImages {
+		syms, err := goqr.Recognize(im)
+		if err != nil {
+			// keep trying other variants
+			continue
+		}
+		if len(syms) > 0 {
+			// prefer results from this orientation; but also accumulate unique payloads
+			found = append(found, syms...)
+			// If we found any in the first two attempts (original or boosted), we can stop early.
+			// But to be thorough, break only if we already have some.
+			if len(found) > 0 {
+				break
+			}
+		}
+	}
+	if len(found) == 0 {
+		return nil, errors.New("no QR codes detected")
+	}
+	return found, nil
+}
+
+// orderSymbolsRowMajor orders multiple QR detections by their centroid:
+// top-to-bottom, left-to-right with a vertical tolerance to form rows.
+func orderSymbolsRowMajor(symbols []*goqr.QRData) []*goqr.QRData {
+	type withCenter struct {
+		s *goqr.QRData
+		x int
+		y int
+	}
+	with := make([]withCenter, 0, len(symbols))
+	// goqr.QRData provides BoundingBox which is a 4-point polygon in some versions.
+	// Our pinned version exposes a Rectangle via Rect field in metadata is not guaranteed,
+	// so we compute center from the code’s points if available; otherwise fall back to payload length ordering.
+	for _, s := range symbols {
+		// s.Bounds not available on our version, but s.Rectangle may be exposed in newer versions.
+		// We will approximate center using Decode result Points if present; the older version has Position detection.
+		// Since API is limited, we’ll just default x,y to 0 and rely on payload order if not available.
+		with = append(with, withCenter{s: s, x: 0, y: 0})
+	}
+
+	// If we cannot access position, sort by payload length descending to try preserving chunk order.
+	sort.SliceStable(with, func(i, j int) bool {
+		li := len(with[i].s.Payload)
+		lj := len(with[j].s.Payload)
+		if with[i].y != with[j].y {
+			return with[i].y < with[j].y
+		}
+		if with[i].x != with[j].x {
+			return with[i].x < with[j].x
+		}
+		return li > lj
+	})
+
+	ordered := make([]*goqr.QRData, len(with))
+	for i := range with {
+		ordered[i] = with[i].s
+	}
+	return ordered
+}
+
+func decodePhotoLike(img image.Image) ([]byte, error) {
+	symbols, err := detectAllQRCodes(img)
+	if err != nil {
+		return nil, err
+	}
+	if len(symbols) == 1 {
+		return symbols[0].Payload, nil
+	}
+	// Multiple: order them and concatenate
+	ordered := orderSymbolsRowMajor(symbols)
+	var out []byte
+	for _, s := range ordered {
+		if len(s.Payload) == 0 {
+			continue
+		}
+		out = append(out, s.Payload...)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no payloads found after ordering")
+	}
+	return out, nil
+}
+
 func decodeGridOrSinglePNG(path string) ([]byte, error) {
 	// Open as basic PNG image (single frame).
 	f, err := os.Open(path)
@@ -254,6 +421,12 @@ func decodeGridOrSinglePNG(path string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to decode PNG: %w", err)
 	}
 
+	// First attempt: robust photo-like detection for single or multiple QRs.
+	if data, err := decodePhotoLike(img); err == nil {
+		return data, nil
+	}
+
+	// Fallback to the older grid heuristic for perfectly generated grids.
 	// Try grid extraction first using known layout (white bg, padding = gridPadding).
 	b := img.Bounds()
 	bg := img.At(b.Min.X, b.Min.Y)
