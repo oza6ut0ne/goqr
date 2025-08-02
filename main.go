@@ -472,7 +472,7 @@ func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
 	makeRotations(cropMargins(img))
 	makeRotations(boostContrast(img))
 
-	// Deduplicate by bounds pointer (not strictly necessary)
+	// Try each variant until one yields any symbols
 	found := []*goqr.QRData(nil)
 	for _, im := range variants {
 		syms, err := goqr.Recognize(im)
@@ -480,7 +480,6 @@ func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
 			continue
 		}
 		if len(syms) > 0 {
-			// Prefer the first successful variant. Collect all symbols found in this variant.
 			found = syms
 			break
 		}
@@ -496,8 +495,7 @@ func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
 // top-to-bottom, left-to-right with a vertical tolerance to form rows.
 // Our goqr version lacks geometry; as a fallback we keep the order as returned.
 func orderSymbolsRowMajor(symbols []*goqr.QRData) []*goqr.QRData {
-	// If we had geometry, we would compute centers and sort. With current version,
-	// keep stable order and prefer longer payloads first to reduce noise.
+	// Prefer longer payload first to reduce noise if multiple are detected.
 	sort.SliceStable(symbols, func(i, j int) bool {
 		return len(symbols[i].Payload) > len(symbols[j].Payload)
 	})
@@ -707,6 +705,7 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	}
 
 	// If PNG, try exact grid heuristic as last resort (for generated grids).
+IfPNG:
 	if ext == ".png" {
 		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
 		ff, err := os.Open(path)
@@ -741,6 +740,7 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 		return payload, "single", 1, nil
 	}
 
+	// For JPEG, no grid heuristic; return the original error.
 	return nil, "", 0, errors.New("failed to decode QR(s) from image")
 }
 
@@ -1024,95 +1024,3 @@ func saveGridDebugImage(inputPath string, src image.Image, tileCount int) error 
 			if qrH <= 0 {
 				qrH = pngSize
 			}
-
-			cols := 0
-			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
-				cols++
-			}
-			rows := 0
-			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
-				rows++
-			}
-			thickness := max(2, min(qrW, qrH)/40)
-			count := 0
-			for row := 0; row < rows; row++ {
-				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
-				for col := 0; col < cols; col++ {
-					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
-					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
-					drawRect(rgba, tileRect, green, thickness)
-					count++
-					if tileCount > 0 && count >= tileCount {
-						// Optional: stop after drawing number of decoded tiles.
-					}
-				}
-			}
-		}
-	}
-
-	out := debugOutputPath(inputPath)
-	f, err := os.Create(out)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return png.Encode(f, rgba)
-}
-
-func debugOutputPath(inputPath string) string {
-	dir := filepath.Dir(inputPath)
-	base := filepath.Base(inputPath)
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	return filepath.Join(dir, fmt.Sprintf("%s_debug.png", name))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func decodeMode(inputPath string, outPath string) {
-	ext := strings.ToLower(filepath.Ext(inputPath))
-
-	// Forced mode handling
-	switch decodeModeFlag {
-	case "apng":
-		if ext != ".png" {
-			log.Fatalf("Forced mode=apng requires a .png file")
-		}
-		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
-			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
-			writeDecoded(data, outPath)
-			return
-		} else if err != nil {
-			log.Fatalf("APNG decode failed: %v", err)
-		} else {
-			log.Fatalf("APNG decode did not yield enough frames (nonMarker=%d qrs=%d)", nonMarker, qrCount)
-		}
-	case "grid":
-		// Open PNG and run grid heuristic
-		if ext != ".png" {
-			log.Fatalf("Forced mode=grid requires a .png file")
-		}
-		f, err := os.Open(inputPath)
-		if err != nil {
-			log.Fatalf("Failed to open image: %v", err)
-		}
-		defer f.Close()
-		img, err := png.Decode(f)
-		if err != nil {
-			log.Fatalf("Failed to decode PNG: %v", err)
-		}
-		data, count, err := decodeGridHeuristic(img)
-		if err != nil {
-			log
