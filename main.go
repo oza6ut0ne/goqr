@@ -1077,4 +1077,39 @@ func main() {
 		if *chunkSize <= 0 {
 			log.Fatalf("Error: chunksize must be a positive number.")
 		}
-		// QR codes can hold up to 295
+		// QR codes can hold up to 2953 bytes with the lowest error correction.
+		if *chunkSize > 2953 {
+			log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
+		}
+
+		// Validate delay.
+		if *delay <= 0 {
+			log.Fatalf("Error: delay must be a positive number.")
+		}
+		if *delay > 65535 {
+			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
+		}
+
+		// Require exactly one input file.
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputFilename := flag.Arg(0)
+		encodeMode(*format, *chunkSize, *delay, inputFilename)
+
+	case "decode":
+		// Require exactly one input file (the PNG/JPG/APNG to decode).
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputImage := flag.Arg(0)
+		decodeMode(inputImage, *outPath)
+
+	default:
+		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
+	}
+}
