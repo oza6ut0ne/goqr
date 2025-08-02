@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/png"
 	"log"
@@ -12,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kettek/apng"
+	"github.comcom/kettek/apng"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -164,6 +165,18 @@ func main() {
 
 	// 6. Write the output file based on the number of images and the format flag.
 	if len(images) > 1 {
+		// Add start (red) and end (blue) marker frames.
+		fmt.Println("Adding start and end marker frames.")
+		redImg := image.NewRGBA(image.Rect(0, 0, pngSize, pngSize))
+		draw.Draw(redImg, redImg.Bounds(), &image.Uniform{C: color.RGBA{R: 0xff, A: 0xff}}, image.Point{}, draw.Src)
+
+		blueImg := image.NewRGBA(image.Rect(0, 0, pngSize, pngSize))
+		draw.Draw(blueImg, blueImg.Bounds(), &image.Uniform{C: color.RGBA{B: 0xff, A: 0xff}}, image.Point{}, draw.Src)
+
+		// Prepend red image and append blue image.
+		images = append([]image.Image{redImg}, images...)
+		images = append(images, blueImg)
+
 		switch *format {
 		case "apng":
 			createAnimatedPNG(images, outputFilename, len(data), *delay)
