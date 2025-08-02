@@ -69,7 +69,7 @@ func createGridPNG(images []image.Image, outputFilename string) {
 	fmt.Printf("\nSuccessfully created grid QR code %s.\n", outputFilename)
 }
 
-func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int) {
+func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int, delayMs int) {
 	fmt.Printf("Input is %d bytes, generating an animated PNG with %d frames.\n", dataLen, len(images))
 	outFile, err := os.Create(outputFilename)
 	if err != nil {
@@ -81,8 +81,8 @@ func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int)
 	for i, img := range images {
 		a.Frames = append(a.Frames, apng.Frame{
 			Image:            img,
-			DelayNumerator:   1, // 1 second delay per frame
-			DelayDenominator: 1,
+			DelayNumerator:   uint16(delayMs),
+			DelayDenominator: 1000, // to convert milliseconds to seconds
 		})
 		fmt.Printf("Processing frame %d...\n", i+1)
 	}
@@ -97,6 +97,7 @@ func main() {
 	// 1. Define and parse command-line flags.
 	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image.")
 	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame.")
+	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs.")
 	flag.Parse()
 
 	// Validate chunk size.
@@ -106,6 +107,14 @@ func main() {
 	// QR codes can hold up to 2953 bytes with the lowest error correction.
 	if *chunkSize > 2953 {
 		log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
+	}
+
+	// Validate delay.
+	if *delay <= 0 {
+		log.Fatalf("Error: delay must be a positive number.")
+	}
+	if *delay > 65535 {
+		log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
 	}
 
 	// 2. Check for a single command-line argument for the input file.
@@ -157,7 +166,7 @@ func main() {
 	if len(images) > 1 {
 		switch *format {
 		case "apng":
-			createAnimatedPNG(images, outputFilename, len(data))
+			createAnimatedPNG(images, outputFilename, len(data), *delay)
 		case "grid":
 			createGridPNG(images, outputFilename)
 		default:
