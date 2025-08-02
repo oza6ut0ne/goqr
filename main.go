@@ -474,6 +474,28 @@ func decodePhotoLike(img image.Image) ([]byte, int, error) {
 	return out, len(ordered), nil
 }
 
+// drawSymbolsDebug outlines each detected symbol with a green rectangle if geometry is available.
+// Since our pinned goqr version lacks geometry fields, we approximate by outlining the full image
+// when we cannot extract per-symbol rectangles.
+func drawSymbolsDebug(inputPath string, src image.Image, symbols []*goqr.QRData) error {
+	b := src.Bounds()
+	rgba := image.NewRGBA(b)
+	draw.Draw(rgba, b, src, b.Min, draw.Src)
+
+	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
+	// We cannot access per-symbol bounds with current library version.
+	// As a best-effort, draw one border around the whole image to indicate detection happened.
+	drawRect(rgba, b, green, max(2, b.Dx()/200))
+
+	out := debugOutputPath(inputPath)
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, rgba)
+}
+
 func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	// Open file
@@ -508,14 +530,21 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	}
 
 	// Robust photo-like detection for single or multiple QRs (works for PNG or JPEG).
-	if data, count, err := decodePhotoLike(img); err == nil {
-		// Save a coarse debug image (whole-image green border) for photo mode.
+	if symbols, err := detectAllQRCodes(img); err == nil && len(symbols) > 0 {
+		ordered := orderSymbolsRowMajor(symbols)
+		var out []byte
+		for _, s := range ordered {
+			if len(s.Payload) == 0 {
+				continue
+			}
+			out = append(out, s.Payload...)
+		}
 		if debugMode {
-			if err := saveWholeImageBox(path, img); err != nil {
+			if err := drawSymbolsDebug(path, img, ordered); err != nil {
 				log.Printf("debug: failed to save photo debug image: %v", err)
 			}
 		}
-		return data, "photo", count, nil
+		return out, "photo", len(ordered), nil
 	}
 
 	// If PNG, we can try the exact grid heuristic as a last resort (for generated grids).
