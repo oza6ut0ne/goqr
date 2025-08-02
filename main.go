@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -119,7 +118,7 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 	}
 
 	if len(data) == 0 {
-		log.Fatalf("Input file %s is empty.", inputFilename)
+		log.Fatalf("Input file %s is empty.", inputFilename, err)
 	}
 
 	// 4. Generate QR codes for each chunk and store them in memory as images.
@@ -186,13 +185,13 @@ func generateQRCodeImage(data []byte, size int) (image.Image, error) {
 
 	// Prepare hints: Error correction level M and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
-	hints[qrcodewriter.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevel_M
+	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevelM
 	hints[gozxing.EncodeHintType_MARGIN] = 0
 	// Optional: specify character set to ensure binary survives (ISO-8859-1)
 	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
 
 	writer := qrcodewriter.NewQRCodeWriter()
-	bm, err := writer.EncodeWithHint(content, gozxing.BarcodeFormat_QR_CODE, size, size, hints)
+	bm, err := writer.Encode(content, gozxing.BarcodeFormat_QR_CODE, size, size, hints)
 	if err != nil {
 		return nil, fmt.Errorf("qr render: %w", err)
 	}
@@ -282,7 +281,7 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	src := gozxing.NewLuminanceSourceFromImage(img)
 
-	bmp, err := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizerFromSource(src))
+	bmp, err := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +296,7 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	}
 
 	// Fallback to HybridBinarizer
-	bmp2, err2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizerFromSource(src))
+	bmp2, err2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
 	if err2 != nil {
 		return nil, err2
 	}
@@ -520,7 +519,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	for _, im := range variants {
 		src := gozxing.NewLuminanceSourceFromImage(im)
 		// Try hybrid first
-		bmp, err := gozxing.NewBinaryBitmap(common.NewHybridBinarizerFromSource(src))
+		bmp, err := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
 		if err == nil {
 			results, err := reader.DecodeMultiple(bmp, nil)
 			if err == nil && len(results) > 0 {
@@ -532,7 +531,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 			}
 		}
 		// Fallback: global histogram
-		bmp2, err2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizerFromSource(src))
+		bmp2, err2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
 		if err2 == nil {
 			results2, err2 := reader.DecodeMultiple(bmp2, nil)
 			if err2 == nil && len(results2) > 0 {
