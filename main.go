@@ -19,8 +19,12 @@ import (
 	"strings"
 
 	"github.com/kettek/apng"
-	"github.com/liyue201/goqr"
 	"github.com/skip2/go-qrcode"
+
+	// gozxing imports
+	"github.com/makiuchi-d/gozxing"
+	"github.com/makiuchi-d/gozxing/common"
+	"github.com/makiuchi-d/gozxing/multi/qrcode"
 )
 
 // The size of the generated PNG image in pixels.
@@ -247,25 +251,33 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 	return float64(hits)/float64(total) >= minRatio
 }
 
-// decodeSingleQR returns the payload from the best QR found in the image.
+// decodeSingleQR returns the payload from the best QR found in the image using gozxing.
 func decodeSingleQR(img image.Image) ([]byte, error) {
-	symbols, err := goqr.Recognize(img)
-	if err != nil {
-		return nil, fmt.Errorf("failed to recognize QR: %w", err)
+	src := gozxing.NewLuminanceSourceFromImage(img)
+	bmp := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
+	reader := qrcode.NewQRCodeMultiReader()
+	// Try multi first, if it returns one, use the first.
+	results, err := reader.DecodeMultiple(bmp, nil)
+	if err == nil && len(results) > 0 {
+		// Choose the longest payload
+		sort.Slice(results, func(i, j int) bool {
+			return len(results[i].GetText()) > len(results[j].GetText())
+		})
+		return []byte(results[0].GetText()), nil
 	}
-	if len(symbols) == 0 {
-		return nil, errors.New("no QR code found")
+
+	// Fallback to single QRCode reader via Decode (use MultiReader with single result attempt)
+	// Use a generic multi reader path as above; if failed, try HybridBinarizer
+	bmp2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
+	results2, err2 := reader.DecodeMultiple(bmp2, nil)
+	if err2 == nil && len(results2) > 0 {
+		sort.Slice(results2, func(i, j int) bool {
+			return len(results2[i].GetText()) > len(results2[j].GetText())
+		})
+		return []byte(results2[0].GetText()), nil
 	}
-	// Pick the one with the longest payload.
-	idx := 0
-	maxLen := len(symbols[0].Payload)
-	for i := 1; i < len(symbols); i++ {
-		if l := len(symbols[i].Payload); l > maxLen {
-			maxLen = l
-			idx = i
-		}
-	}
-	return symbols[idx].Payload, nil
+
+	return nil, errors.New("no QR code found")
 }
 
 // decodeAPNG decodes APNG and returns data, number of QR frames decoded, and number of non-marker frames.
@@ -449,9 +461,9 @@ func cropMargins(src image.Image) image.Image {
 	return dst
 }
 
-// detectAllQRCodes tries to detect QR codes in the given image with multiple attempts.
+// detectAllQRCodes tries to detect QR codes in the given image with multiple attempts using gozxing.
 // For photo inputs (grid photos), we aggressively preprocess and attempt multiple rotations.
-func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
+func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	var variants []image.Image
 
 	// Base variants
@@ -472,64 +484,62 @@ func detectAllQRCodes(img image.Image) ([]*goqr.QRData, error) {
 	makeRotations(cropMargins(img))
 	makeRotations(boostContrast(img))
 
-	// Try each variant until one yields any symbols
-	found := []*goqr.QRData(nil)
+	reader := qrcode.NewQRCodeMultiReader()
 	for _, im := range variants {
-		syms, err := goqr.Recognize(im)
-		if err != nil {
-			continue
+		src := gozxing.NewLuminanceSourceFromImage(im)
+		// Try hybrid first
+		bmp := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
+		results, err := reader.DecodeMultiple(bmp, nil)
+		if err == nil && len(results) > 0 {
+			var payloads [][]byte
+			for _, r := range results {
+				payloads = append(payloads, []byte(r.GetText()))
+			}
+			return payloads, nil
 		}
-		if len(syms) > 0 {
-			found = syms
-			break
+		// Fallback: global histogram
+		bmp2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
+		results2, err2 := reader.DecodeMultiple(bmp2, nil)
+		if err2 == nil && len(results2) > 0 {
+			var payloads [][]byte
+			for _, r := range results2 {
+				payloads = append(payloads, []byte(r.GetText()))
+			}
+			return payloads, nil
 		}
 	}
 
-	if len(found) == 0 {
-		return nil, errors.New("no QR codes detected")
-	}
-	return found, nil
+	return nil, errors.New("no QR codes detected")
 }
 
-// orderSymbolsRowMajor orders multiple QR detections by their centroid:
-// top-to-bottom, left-to-right with a vertical tolerance to form rows.
-// Our goqr version lacks geometry; as a fallback we keep the order as returned.
-func orderSymbolsRowMajor(symbols []*goqr.QRData) []*goqr.QRData {
-	// Prefer longer payload first to reduce noise if multiple are detected.
-	sort.SliceStable(symbols, func(i, j int) bool {
-		return len(symbols[i].Payload) > len(symbols[j].Payload)
+// orderPayloadsForGrid attempts to order multiple decoded payloads conservatively.
+// With no geometry, we simply keep as-is but prefer longer payloads first.
+func orderPayloadsForGrid(payloads [][]byte) [][]byte {
+	sort.SliceStable(payloads, func(i, j int) bool {
+		return len(payloads[i]) > len(payloads[j])
 	})
-	return symbols
+	return payloads
 }
 
 func decodePhotoLike(img image.Image) ([]byte, int, error) {
-	symbols, err := detectAllQRCodes(img)
+	payloads, err := detectAllQRCodes(img)
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(symbols) == 1 {
-		return symbols[0].Payload, 1, nil
+	if len(payloads) == 1 {
+		return payloads[0], 1, nil
 	}
-	ordered := orderSymbolsRowMajor(symbols)
+	ordered := orderPayloadsForGrid(payloads)
 	var out []byte
-	count := 0
-	for _, s := range ordered {
-		if len(s.Payload) == 0 {
-			continue
-		}
-		out = append(out, s.Payload...)
-		count++
+	for _, p := range ordered {
+		out = append(out, p...)
 	}
-	if count == 0 {
-		return nil, 0, errors.New("no payloads found after ordering")
-	}
-	return out, count, nil
+	return out, len(ordered), nil
 }
 
-// drawSymbolsDebug outlines each detected symbol with a green rectangle if geometry is available.
-// Our library version lacks per-symbol geometry, so we draw a coarse grid overlay as a proxy:
-// we try to infer a regular grid layout and draw rectangles at the estimated tile positions.
-func drawSymbolsDebug(inputPath string, src image.Image, symbols []*goqr.QRData) error {
+// drawSymbolsDebug: we don't have geometry from gozxing via MultiReader in this code,
+// so we infer a likely grid overlay and draw boxes at estimated tile positions (same as before).
+func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) error {
 	// Attempt to infer a grid overlay similar to decodeGridHeuristic
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
@@ -683,25 +693,18 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 	}
 
 	// Photo-like robust multi-QR decode (assumes a photographed grid)
-	if symbols, err := detectAllQRCodes(img); err == nil && len(symbols) > 0 {
-		ordered := orderSymbolsRowMajor(symbols)
+	if payloads, err := detectAllQRCodes(img); err == nil && len(payloads) > 0 {
+		ordered := orderPayloadsForGrid(payloads)
 		var out []byte
-		valid := 0
-		for _, s := range ordered {
-			if len(s.Payload) == 0 {
-				continue
-			}
-			out = append(out, s.Payload...)
-			valid++
+		for _, p := range ordered {
+			out = append(out, p...)
 		}
-		if valid > 0 {
-			if debugMode {
-				if err := drawSymbolsDebug(path, img, ordered); err != nil {
-					log.Printf("debug: failed to save photo debug image: %v", err)
-				}
+		if debugMode {
+			if err := drawSymbolsDebug(path, img, ordered); err != nil {
+				log.Printf("debug: failed to save photo debug image: %v", err)
 			}
-			return out, "photo", valid, nil
 		}
+		return out, "photo", len(ordered), nil
 	}
 
 	// If PNG, try exact grid heuristic as last resort (for generated grids).
