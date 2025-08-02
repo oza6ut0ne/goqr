@@ -280,11 +280,12 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 		return false
 	}
 
-	// sample every N pixels, scaling with size
+	// sample every N pixels, scaling with size for both X and Y
+	stepX := max(4, width/64)
 	stepY := max(4, height/64)
 	var total, hits int
 	for y := b.Min.Y; y < b.Max.Y; y += stepY {
-		for x := b.Min.X; x < b.Max.X; x++ {
+		for x := b.Min.X; x < b.Max.X; x += stepX {
 			total++
 			if nearColor(img.At(x, y), target, tol) {
 				hits++
@@ -619,19 +620,115 @@ func orderPayloadsForGrid(payloads [][]byte) [][]byte {
 	return payloads
 }
 
+// drawSymbolsDebug: try to estimate and draw per-QR rectangles for photo-like inputs.
+// Fall back to whole-image rectangle if estimation fails.
 func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) error {
-	// For now, we just draw a green rectangle over the whole image when background isn't white.
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
 
+	// Attempt a simple grid inference similar to grid heuristic
+	// Only run when background is mostly white
 	bg := src.At(b.Min.X, b.Min.Y)
 	r, g, bl, a := bg.RGBA()
-	if !(uint8(r>>8) == 0xff && uint8(g>>8) == 0xff && uint8(bl>>8) == 0xff && uint8(a>>8) == 0xff) {
-		drawRect(rgba, b, green, max(2, b.Dx()/200))
+	isWhiteBG := uint8(r>>8) == 0xff && uint8(g>>8) == 0xff && uint8(bl>>8) == 0xff && uint8(a>>8) == 0xff
+
+	if isWhiteBG {
+		// Probe for first dark pixel within padding window to estimate first QR tile start
+		startY := b.Min.Y + gridPadding
+		startX := b.Min.X + gridPadding
+		found := false
+		var qrStartX, qrStartY int
+		maxProbe := gridPadding + 16
+		for yy := startY; yy < startY+maxProbe && yy < b.Max.Y; yy++ {
+			for xx := startX; xx < startX+maxProbe && xx < b.Max.X; xx++ {
+				rr, gg, bb, aa := src.At(xx, yy).RGBA()
+				if !isWhite(rr, gg, bb, aa) {
+					qrStartX = xx
+					qrStartY = yy
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+
+		if found {
+			// Measure tile size by scanning until white runs exceed tolerance
+			whiteRun := 0
+			qrW := 0
+			tolerance := 3
+			yScan := qrStartY
+			for x := qrStartX; x < b.Max.X; x++ {
+				rr, gg, bb, aa := src.At(x, yScan).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrW = x - qrStartX - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrW <= 0 {
+				qrW = max(32, b.Dx()/8)
+			}
+
+			whiteRun = 0
+			qrH := 0
+			xScan := qrStartX
+			for y := qrStartY; y < b.Max.Y; y++ {
+				rr, gg, bb, aa := src.At(xScan, y).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrH = y - qrStartY - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrH <= 0 {
+				qrH = qrW
+			}
+
+			// Determine reasonable grid bounds
+			cols := 0
+			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
+				cols++
+			}
+			rows := 0
+			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
+				rows++
+			}
+
+			thickness := max(2, min(qrW, qrH)/40)
+			for row := 0; row < rows; row++ {
+				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
+				for col := 0; col < cols; col++ {
+					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
+					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
+					drawRect(rgba, tileRect, green, thickness)
+				}
+			}
+
+			out := debugOutputPath(inputPath)
+			f, err := os.Create(out)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			return png.Encode(f, rgba)
+		}
 	}
 
+	// Fallback: whole-image rectangle
+	drawRect(rgba, b, green, max(2, b.Dx()/200))
 	out := debugOutputPath(inputPath)
 	f, err := os.Create(out)
 	if err != nil {
@@ -639,89 +736,6 @@ func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) erro
 	}
 	defer f.Close()
 	return png.Encode(f, rgba)
-}
-
-func decodeStaticImageFile(path string) ([]byte, string, int, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	// Open file
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	defer f.Close()
-
-	var img image.Image
-	switch ext {
-	case ".png":
-		img, err = png.Decode(f)
-	case ".jpg", ".jpeg":
-		img, err = jpeg.Decode(f)
-	default:
-		if img, err = png.Decode(f); err != nil {
-			_ = f.Close()
-			f2, err2 := os.Open(path)
-			if err2 != nil {
-				return nil, "", 0, err2
-			}
-			defer f2.Close()
-			img, err = jpeg.Decode(f2)
-		}
-	}
-	if err != nil {
-		return nil, "", 0, fmt.Errorf("failed to decode image %s: %w", path, err)
-	}
-
-	// Photo-like robust multi-QR decode (assumes a photographed grid)
-	if payloads, err := detectAllQRCodes(img); err == nil && len(payloads) > 0 {
-		ordered := orderPayloadsForGrid(payloads)
-		data, total, err := reassembleFrames(ordered)
-		if err == nil {
-			if debugMode {
-				if err := drawSymbolsDebug(path, img, ordered); err != nil {
-					log.Printf("debug: failed to save photo debug image: %v", err)
-				}
-			}
-			return data, "photo", total, nil
-		}
-	}
-
-	// If PNG, try exact grid heuristic as last resort (for generated grids).
-	if ext == ".png" {
-		ff, err := os.Open(path)
-		if err != nil {
-			return nil, "", 0, err
-		}
-		defer ff.Close()
-		pimg, err := png.Decode(ff)
-		if err != nil {
-			return nil, "", 0, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
-		}
-		data, count, err := decodeGridHeuristic(pimg)
-		if err == nil {
-			if debugMode {
-				if err := saveGridDebugImage(path, pimg, count); err != nil {
-					log.Printf("debug: failed to save grid debug image: %v", err)
-				}
-			}
-			return data, "grid", count, nil
-		}
-	}
-
-	// As a final fallback, try single QR on the whole image.
-	if payload, err := decodeSingleQR(img); err == nil {
-		// Try stripping 8-byte header if present.
-		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
-			payload = p
-		}
-		if debugMode {
-			if err := saveWholeImageBox(path, img); err != nil {
-				log.Printf("debug: failed to save single debug image: %v", err)
-			}
-		}
-		return payload, "single", 1, nil
-	}
-
-	return nil, "", 0, errors.New("failed to decode QR(s) from image")
 }
 
 // The previous grid heuristic, refactored to accept an already-decoded image.
@@ -918,15 +932,105 @@ func saveWholeImageBox(inputPath string, src image.Image) error {
 	return png.Encode(f, rgba)
 }
 
-// saveGridDebugImage draws green rectangles on grid tiles that decoded successfully.
+// saveGridDebugImage draws green rectangles on grid tiles using grid inference logic.
 func saveGridDebugImage(inputPath string, src image.Image, tileCount int) error {
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
 
-	// For simplicity, just draw a whole-image box here.
-	drawRect(rgba, b, green, max(2, b.Dx()/200))
+	// Recreate grid layout with same probing as decodeGridHeuristic
+	bg := src.At(b.Min.X, b.Min.Y)
+	r, g, bl, a := bg.RGBA()
+	if !isWhite(r, g, bl, a) {
+		// If not white background, just draw a whole-image box.
+		drawRect(rgba, b, green, max(2, b.Dx()/200))
+	} else {
+		startY := b.Min.Y + gridPadding
+		startX := b.Min.X + gridPadding
+		found := false
+		var qrStartX, qrStartY int
+		maxProbe := gridPadding + 8
+		for yy := startY; yy < startY+maxProbe && yy < b.Max.Y; yy++ {
+			for xx := startX; xx < startX+maxProbe && xx < b.Max.X; xx++ {
+				rr, gg, bb, aa := src.At(xx, yy).RGBA()
+				if !isWhite(rr, gg, bb, aa) {
+					qrStartX = xx
+					qrStartY = yy
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			drawRect(rgba, b, green, max(2, b.Dx()/200))
+		} else {
+			// measure widths/heights same as decodeGridHeuristic
+			whiteRun := 0
+			qrW := 0
+			tolerance := 3
+			yScan := qrStartY
+			for x := qrStartX; x < b.Max.X; x++ {
+				rr, gg, bb, aa := src.At(x, yScan).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrW = x - qrStartX - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrW <= 0 {
+				qrW = pngSize
+			}
+			whiteRun = 0
+			qrH := 0
+			xScan := qrStartX
+			for y := qrStartY; y < b.Max.Y; y++ {
+				rr, gg, bb, aa := src.At(xScan, y).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrH = y - qrStartY - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrH <= 0 {
+				qrH = pngSize
+			}
+
+			cols := 0
+			for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
+				cols++
+			}
+			rows := 0
+			for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
+				rows++
+			}
+			thickness := max(2, min(qrW, qrH)/40)
+			count := 0
+			for row := 0; row < rows; row++ {
+				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
+				for col := 0; col < cols; col++ {
+					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
+					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
+					drawRect(rgba, tileRect, green, thickness)
+					count++
+					if tileCount > 0 && count >= tileCount {
+						// Optional: could stop early, but drawing all helps visualize layout
+					}
+				}
+			}
+		}
+	}
 
 	out := debugOutputPath(inputPath)
 	f, err := os.Create(out)
@@ -1029,125 +1133,4 @@ func decodeMode(inputPath string, outPath string) {
 			img, err = jpeg.Decode(f)
 		}
 		if err != nil {
-			log.Fatalf("Failed to decode image: %v", err)
-		}
-		payload, err := decodeSingleQR(img)
-		if err != nil {
-			log.Fatalf("Single decode failed: %v", err)
-		}
-		// Strip 8-byte header if present
-		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
-			payload = p
-		}
-		if debugMode {
-			if err := saveWholeImageBox(inputPath, img); err != nil {
-				log.Printf("debug: failed to save single debug image: %v", err)
-			}
-		}
-		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
-		writeDecoded(payload, outPath)
-		return
-	case "auto", "":
-		// proceed to auto flow below
-	default:
-		log.Fatalf("Invalid -decode-mode value: %s (valid: auto, apng, grid, photo, single)", decodeModeFlag)
-	}
-
-	// Auto-detection flow (existing behavior)
-	// For PNGs, try APNG first as before.
-	if ext == ".png" {
-		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
-			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
-			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
-			writeDecoded(data, outPath)
-			return
-		}
-		// Otherwise fall through to static image path.
-	}
-
-	// Static image decode path supports PNG and JPEG.
-	data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
-	if err != nil {
-		log.Fatalf("Decode failed: %v", err)
-	}
-	if fmtDetected == "" {
-		fmtDetected = "unknown"
-	}
-	fmt.Printf("mode=decode format=%s qrs=%d\n", fmtDetected, count)
-	writeDecoded(data, outPath)
-}
-
-func writeDecoded(data []byte, outPath string) {
-	var w io.Writer
-	if outPath == "" || outPath == "-" {
-		w = os.Stdout
-	} else {
-		f, err := os.Create(outPath)
-		if err != nil {
-			log.Fatalf("Failed to create output file %s: %v", outPath, err)
-		}
-		defer f.Close()
-		w = f
-	}
-	if _, err := w.Write(data); err != nil {
-		log.Fatalf("Failed to write decoded data: %v", err)
-	}
-	if outPath != "" && outPath != "-" {
-		fmt.Printf("Decoded %d bytes to %s\n", len(data), outPath)
-	}
-}
-
-func main() {
-	// Modes: encode (default) and decode
-	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
-	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
-	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
-	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
-	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
-	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
-	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
-	flag.Parse()
-
-	switch *mode {
-	case "encode":
-		// Validate chunk size.
-		if *chunkSize <= frameHeaderSize {
-			log.Fatalf("Error: chunksize must be greater than %d.", frameHeaderSize)
-		}
-		// QR codes can hold up to ~2953 bytes at low EC; actual capacity varies.
-		infCapWarn := 4096
-		if *chunkSize > infCapWarn {
-			log.Printf("Warning: chunksize %d is quite large; encoding may fail for some data.", *chunkSize)
-		}
-
-		// Validate delay.
-		if *delay <= 0 {
-			log.Fatalf("Error: delay must be a positive number.")
-		}
-		if *delay > 65535 {
-			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
-		}
-
-		// Require exactly one input file.
-		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
-		inputFilename := flag.Arg(0)
-		encodeMode(*format, *chunkSize, *delay, inputFilename)
-
-	case "decode":
-		// Require exactly one input file (the PNG/JPG/APNG to decode).
-		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
-		inputImage := flag.Arg(0)
-		decodeMode(inputImage, *outPath)
-
-	default:
-		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
-	}
-}
+			log.Fatalf("Failed to decode image: %
