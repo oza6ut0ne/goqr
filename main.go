@@ -1133,4 +1133,99 @@ func decodeMode(inputPath string, outPath string) {
 			img, err = jpeg.Decode(f)
 		}
 		if err != nil {
-			log.Fatalf("Failed to decode image: %
+			log.Fatalf("Failed to decode image: %v", err)
+		}
+		payload, err := decodeSingleQR(img)
+		if err != nil {
+			log.Fatalf("Single decode failed: %v", err)
+		}
+		// Strip 8-byte header if present
+		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
+			payload = p
+		}
+		if debugMode {
+			if err := saveWholeImageBox(inputPath, img); err != nil {
+				log.Printf("debug: failed to save single debug image: %v", err)
+			}
+		}
+		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
+		writeDecoded(payload, outPath)
+		return
+	case "auto", "":
+		// proceed to auto flow below
+	default:
+		log.Fatalf("Invalid -decode-mode value: %s (valid: auto, apng, grid, photo, single)", decodeModeFlag)
+	}
+
+	// Auto-detection flow (existing behavior)
+	// For PNGs, try APNG first as before.
+	if ext == ".png" {
+		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
+			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			writeDecoded(data, outPath)
+			return
+		}
+		// Otherwise fall through to static image path.
+	}
+
+	// Static image decode path supports PNG and JPEG.
+	data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
+	if err != nil {
+		log.Fatalf("Decode failed: %v", err)
+	}
+	if fmtDetected == "" {
+		fmtDetected = "unknown"
+	}
+	fmt.Printf("mode=decode format=%s qrs=%d\n", fmtDetected, count)
+	writeDecoded(data, outPath)
+}
+
+func writeDecoded(data []byte, outPath string) {
+	var w io.Writer
+	if outPath == "" || outPath == "-" {
+		w = os.Stdout
+	} else {
+		f, err := os.Create(outPath)
+		if err != nil {
+			log.Fatalf("Failed to create output file %s: %v", outPath, err)
+		}
+		defer f.Close()
+		w = f
+	}
+	if _, err := w.Write(data); err != nil {
+		log.Fatalf("Failed to write decoded data: %v", err)
+	}
+	if outPath != "" && outPath != "-" {
+		fmt.Printf("Decoded %d bytes to %s\n", len(data), outPath)
+	}
+}
+
+func main() {
+	// Modes: encode (default) and decode
+	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
+	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
+	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
+	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
+	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
+	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
+	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
+	flag.Parse()
+
+	switch *mode {
+	case "encode":
+		// Validate chunk size.
+		if *chunkSize <= frameHeaderSize {
+			log.Fatalf("Error: chunksize must be greater than %d.", frameHeaderSize)
+		}
+		// QR codes can hold up to ~2953 bytes at low EC; actual capacity varies.
+		infCapWarn := 4096
+		if *chunkSize > infCapWarn {
+			log.Printf("Warning: chunksize %d is quite large; encoding may fail for some data.", *chunkSize)
+		}
+
+		// Validate delay.
+		if *delay <= 0 {
+			log.Fatalf("Error: delay must be a positive number.")
+		}
+		if *delay > 655
