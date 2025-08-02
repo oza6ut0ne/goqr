@@ -176,6 +176,7 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 	}
 }
 
+// Strict solid color check (kept for exact programmatic grids/APNGs).
 func isSolidColor(img image.Image, c color.RGBA) bool {
 	b := img.Bounds()
 	for y := b.Min.Y; y < b.Max.Y; y++ {
@@ -188,6 +189,56 @@ func isSolidColor(img image.Image, c color.RGBA) bool {
 		}
 	}
 	return true
+}
+
+// nearColor returns true if the pixel is close to the target color within tolerance.
+func nearColor(px color.Color, target color.RGBA, tol uint8) bool {
+	r, g, b, a := px.RGBA()
+	r8 := uint8(r >> 8)
+	g8 := uint8(g >> 8)
+	b8 := uint8(b >> 8)
+	a8 := uint8(a >> 8)
+	// require reasonable opacity to avoid backgrounds
+	if a8 < 200 {
+		return false
+	}
+	absDiff := func(a, b uint8) uint8 {
+		if a > b {
+			return a - b
+		}
+		return b - a
+	}
+	return absDiff(r8, target.R) <= tol &&
+		absDiff(g8, target.G) <= tol &&
+		absDiff(b8, target.B) <= tol
+}
+
+// isMostlyColor samples the image on a coarse grid and returns true if the ratio of pixels
+// near the target color is >= minRatio.
+func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float64) bool {
+	b := img.Bounds()
+	width := b.Dx()
+	height := b.Dy()
+	if width == 0 || height == 0 {
+		return false
+	}
+
+	// sample every N pixels, scaling with size
+	stepX := max(4, width/64)
+	stepY := max(4, height/64)
+	var total, hits int
+	for y := b.Min.Y; y < b.Max.Y; y += stepY {
+		for x := b.Min.X; x < b.Max.X; x += stepX {
+			total++
+			if nearColor(img.At(x, y), target, tol) {
+				hits++
+			}
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(hits)/float64(total) >= minRatio
 }
 
 // decodeSingleQR returns the payload from the best QR found in the image.
@@ -226,8 +277,11 @@ func decodeAPNG(path string) ([]byte, error) {
 	var data []byte
 	for _, fr := range a.Frames {
 		img := fr.Image
-		// Skip marker frames (solid red or solid blue with full alpha)
-		if isSolidColor(img, color.RGBA{R: 0xff, A: 0xff}) || isSolidColor(img, color.RGBA{B: 0xff, A: 0xff}) {
+		// Robustly skip marker frames (mostly red or mostly blue)
+		if isMostlyColor(img, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
+			isMostlyColor(img, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
+			isSolidColor(img, color.RGBA{R: 0xff, A: 0xff}) || // keep strict as fast-path
+			isSolidColor(img, color.RGBA{B: 0xff, A: 0xff}) {
 			continue
 		}
 		b, err := decodeSingleQR(img)
@@ -574,8 +628,11 @@ func decodeGridHeuristic(img image.Image) ([]byte, error) {
 						tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
 						qrImg := sub.SubImage(tileRect)
 
-						// Skip solid marker tiles if present
-						if isSolidColor(qrImg, color.RGBA{R: 0xff, A: 0xff}) || isSolidColor(qrImg, color.RGBA{B: 0xff, A: 0xff}) {
+						// Robustly skip marker tiles (mostly red or mostly blue)
+						if isMostlyColor(qrImg, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
+							isMostlyColor(qrImg, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
+							isSolidColor(qrImg, color.RGBA{R: 0xff, A: 0xff}) ||
+							isSolidColor(qrImg, color.RGBA{B: 0xff, A: 0xff}) {
 							continue
 						}
 
@@ -618,6 +675,13 @@ func decodeGridHeuristic(img image.Image) ([]byte, error) {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
