@@ -32,6 +32,9 @@ const gridPadding = 20
 // Global flag to control debug output
 var debugMode bool
 
+// decodeModeFlag controls forced decode mode: "auto" (default), "apng", "grid", "photo", "single".
+var decodeModeFlag string
+
 func createGridPNG(images []image.Image, outputFilename string) {
 	if len(images) == 0 {
 		log.Println("No images to create a grid from.")
@@ -636,7 +639,6 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				}
 			}
 			if qrW <= 0 {
-				// Fallback: approximate width up to next padding
 				qrW = pngSize // safe upper bound; will be bounded by image later
 			}
 
@@ -926,6 +928,95 @@ func max(a, b int) int {
 
 func decodeMode(inputPath string, outPath string) {
 	ext := strings.ToLower(filepath.Ext(inputPath))
+
+	// Forced mode handling
+	switch decodeModeFlag {
+	case "apng":
+		if ext != ".png" {
+			log.Fatalf("Forced mode=apng requires a .png file")
+		}
+		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			writeDecoded(data, outPath)
+			return
+		} else if err != nil {
+			log.Fatalf("APNG decode failed: %v", err)
+		} else {
+			log.Fatalf("APNG decode did not yield enough frames (nonMarker=%d qrs=%d)", nonMarker, qrCount)
+		}
+	case "grid":
+		// Open PNG and run grid heuristic
+		if ext != ".png" {
+			log.Fatalf("Forced mode=grid requires a .png file")
+		}
+		f, err := os.Open(inputPath)
+		if err != nil {
+			log.Fatalf("Failed to open image: %v", err)
+		}
+		defer f.Close()
+		img, err := png.Decode(f)
+		if err != nil {
+			log.Fatalf("Failed to decode PNG: %v", err)
+		}
+		data, count, err := decodeGridHeuristic(img)
+		if err != nil {
+			log.Fatalf("Grid decode failed: %v", err)
+		}
+		if debugMode {
+			if err := saveGridDebugImage(inputPath, img, count); err != nil {
+				log.Printf("debug: failed to save grid debug image: %v", err)
+			}
+		}
+		fmt.Printf("mode=decode format=grid qrs=%d\n", count)
+		writeDecoded(data, outPath)
+		return
+	case "photo":
+		// Decode as static image using photo path first
+		data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
+		if err != nil {
+			log.Fatalf("Photo decode failed: %v", err)
+		}
+		// Ensure we report as photo (even if fallback picked single); keep logging as photo
+		fmt.Printf("mode=decode format=photo qrs=%d\n", count)
+		writeDecoded(data, outPath)
+		return
+	case "single":
+		// Force single QR decode for any image type
+		// Open via PNG or JPEG
+		f, err := os.Open(inputPath)
+		if err != nil {
+			log.Fatalf("Failed to open image: %v", err)
+		}
+		defer f.Close()
+		ext := strings.ToLower(filepath.Ext(inputPath))
+		var img image.Image
+		if ext == ".png" {
+			img, err = png.Decode(f)
+		} else {
+			img, err = jpeg.Decode(f)
+		}
+		if err != nil {
+			log.Fatalf("Failed to decode image: %v", err)
+		}
+		payload, err := decodeSingleQR(img)
+		if err != nil {
+			log.Fatalf("Single decode failed: %v", err)
+		}
+		if debugMode {
+			if err := saveWholeImageBox(inputPath, img); err != nil {
+				log.Printf("debug: failed to save single debug image: %v", err)
+			}
+		}
+		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
+		writeDecoded(payload, outPath)
+		return
+	case "auto", "":
+		// proceed to auto flow below
+	default:
+		log.Fatalf("Invalid -decode-mode value: %s (valid: auto, apng, grid, photo, single)", decodeModeFlag)
+	}
+
+	// Auto-detection flow (existing behavior)
 	// For PNGs, try APNG first as before.
 	if ext == ".png" {
 		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
@@ -977,6 +1068,7 @@ func main() {
 	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
 	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
 	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
+	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
 	flag.Parse()
 
 	switch *mode {
@@ -985,39 +1077,4 @@ func main() {
 		if *chunkSize <= 0 {
 			log.Fatalf("Error: chunksize must be a positive number.")
 		}
-		// QR codes can hold up to 2953 bytes with the lowest error correction.
-		if *chunkSize > 2953 {
-			log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
-		}
-
-		// Validate delay.
-		if *delay <= 0 {
-			log.Fatalf("Error: delay must be a positive number.")
-		}
-		if *delay > 65535 {
-			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
-		}
-
-		// Require exactly one input file.
-		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
-		inputFilename := flag.Arg(0)
-		encodeMode(*format, *chunkSize, *delay, inputFilename)
-
-	case "decode":
-		// Require exactly one input file (the PNG/JPG/APNG to decode).
-		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
-			flag.PrintDefaults()
-			os.Exit(1)
-		}
-		inputImage := flag.Arg(0)
-		decodeMode(inputImage, *outPath)
-
-	default:
-		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
-	}
-}
+		// QR codes can hold up to 295
