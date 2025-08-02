@@ -238,6 +238,10 @@ func decodeAPNG(path string) ([]byte, error) {
 	return data, nil
 }
 
+func isWhite(pxR, pxG, pxB, pxA uint32) bool {
+	return uint8(pxR>>8) == 0xff && uint8(pxG>>8) == 0xff && uint8(pxB>>8) == 0xff && uint8(pxA>>8) == 0xff
+}
+
 func decodeGridOrSinglePNG(path string) ([]byte, error) {
 	// Open as basic PNG image (single frame).
 	f, err := os.Open(path)
@@ -254,102 +258,139 @@ func decodeGridOrSinglePNG(path string) ([]byte, error) {
 	b := img.Bounds()
 	bg := img.At(b.Min.X, b.Min.Y)
 	r, g, bl, a := bg.RGBA()
-	isWhiteBG := uint8(r>>8) == 0xff && uint8(g>>8) == 0xff && uint8(bl>>8) == 0xff && uint8(a>>8) == 0xff
+	isWhiteBG := isWhite(r, g, bl, a)
 
 	if isWhiteBG {
-		// Detect tiles by probing for QR size using first non-white column/row after padding.
-		// Expect left and top margins equal to gridPadding.
-		// Heuristic: sample at y=gridPadding to find first black pixel after left padding.
-		y := b.Min.Y + gridPadding
-		if y < b.Max.Y {
-			xStart := b.Min.X + gridPadding
-			x := xStart
-			for x < b.Max.X {
-				c := img.At(x, y)
-				rr, gg, bb, aa := c.RGBA()
-				isWhite := uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff
-				if !isWhite {
+		// Find the first non-white pixel within a small window after the expected padding.
+		startY := b.Min.Y + gridPadding
+		startX := b.Min.X + gridPadding
+		found := false
+		var qrStartX, qrStartY int
+		maxProbe := gridPadding + 8 // probe within padding + small tolerance
+		for yy := startY; yy < startY+maxProbe && yy < b.Max.Y; yy++ {
+			for xx := startX; xx < startX+maxProbe && xx < b.Max.X; xx++ {
+				rr, gg, bb, aa := img.At(xx, yy).RGBA()
+				if !isWhite(rr, gg, bb, aa) {
+					qrStartX = xx
+					qrStartY = yy
+					found = true
 					break
 				}
-				x++
 			}
-			if x < b.Max.X {
-				// Found start of first QR. Now estimate its width by scanning until we hit white again.
-				startX := x
-				for x < b.Max.X {
-					rr, gg, bb, aa := img.At(x, y).RGBA()
-					isWhite := uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff
-					if isWhite {
-						break
-					}
-					x++
-				}
-				qrW := x - startX
-				// Repeat for height at x=startX
-				yy := b.Min.Y + gridPadding
-				for yy < b.Max.Y {
-					rr, gg, bb, aa := img.At(startX, yy).RGBA()
-					isWhite := uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff
-					if !isWhite {
-						break
-					}
-					yy++
-				}
-				startY := yy
-				for yy < b.Max.Y {
-					rr, gg, bb, aa := img.At(startX, yy).RGBA()
-					isWhite := uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff
-					if isWhite {
-						break
-					}
-					yy++
-				}
-				qrH := yy - startY
+			if found {
+				break
+			}
+		}
 
-				// Validate reasonable size
-				if qrW > 0 && qrH > 0 {
-					// Now iterate tiles in row-major order using padding and measured QR size.
-					var payload []byte
-					for yTop := b.Min.Y + gridPadding; yTop+qrH <= b.Max.Y-gridPadding/2; yTop += qrH + gridPadding {
-						// If row area is white, we might be past the content.
-						rowWhite := true
-						for sx := b.Min.X + gridPadding; sx < b.Min.X+gridPadding+qrW && sx < b.Max.X; sx++ {
-							rr, gg, bb, aa := img.At(sx, yTop).RGBA()
-							if !(uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff) {
-								rowWhite = false
+		if found {
+			// Measure QR width: from qrStartX scan right until we see a run of whites > tolerance.
+			whiteRun := 0
+			qrW := 0
+			tolerance := 3
+			yScan := qrStartY
+			for x := qrStartX; x < b.Max.X; x++ {
+				rr, gg, bb, aa := img.At(x, yScan).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrW = x - qrStartX - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrW <= 0 {
+				// Fallback: approximate width up to next padding
+				qrW = pngSize // safe upper bound; will be bounded by image later
+			}
+
+			// Measure QR height similarly.
+			whiteRun = 0
+			qrH := 0
+			xScan := qrStartX
+			for y := qrStartY; y < b.Max.Y; y++ {
+				rr, gg, bb, aa := img.At(xScan, y).RGBA()
+				if isWhite(rr, gg, bb, aa) {
+					whiteRun++
+					if whiteRun > tolerance {
+						qrH = y - qrStartY - whiteRun + 1
+						break
+					}
+				} else {
+					whiteRun = 0
+				}
+			}
+			if qrH <= 0 {
+				qrH = pngSize
+			}
+
+			// Clamp qrW/qrH so we don't go out of bounds and also ensure > 0
+			if qrW <= 0 || qrH <= 0 {
+				// If still invalid, fall back to single QR decode below.
+			} else {
+				// Iterate tiles row-major using measured qrW/qrH and known padding.
+				var payload []byte
+				// Use SubImage
+				sub, ok := img.(interface {
+					SubImage(r image.Rectangle) image.Image
+				})
+				if !ok {
+					return nil, errors.New("image type does not support SubImage")
+				}
+
+				// Number of columns/rows estimated from canvas size.
+				cols := 0
+				for x := b.Min.X + gridPadding; x+qrW <= b.Max.X; x += qrW + gridPadding {
+					cols++
+				}
+				rows := 0
+				for y := b.Min.Y + gridPadding; y+qrH <= b.Max.Y; y += qrH + gridPadding {
+					rows++
+				}
+
+				// Decode each tile; stop a row when decoding fails entirely (assume trailing empties).
+				for row := 0; row < rows; row++ {
+					yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
+					rowHasData := false
+					for col := 0; col < cols; col++ {
+						xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
+						tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
+						qrImg := sub.SubImage(tileRect)
+
+						// Skip solid marker tiles if present
+						if isSolidColor(qrImg, color.RGBA{R: 0xff, A: 0xff}) || isSolidColor(qrImg, color.RGBA{B: 0xff, A: 0xff}) {
+							continue
+						}
+
+						data, err := decodeSingleQR(qrImg)
+						if err != nil {
+							// If we fail on the first column, consider grid ended after previous rows.
+							if col == 0 {
+								// If we've already collected any data, end all processing.
+								if len(payload) > 0 {
+									return payload, nil
+								}
+								// else continue trying single QR fallback below
+								rows = 0
+								cols = 0
 								break
 							}
-						}
-						if rowWhite {
+							// Otherwise stop the current row.
 							break
 						}
-						for xLeft := b.Min.X + gridPadding; xLeft+qrW <= b.Max.X-gridPadding/2; xLeft += qrW + gridPadding {
-							tileRect := image.Rect(xLeft, yTop, xLeft+qrW, yTop+qrH)
-							// Quick check: skip if tile area is mostly white (empty)
-							sample := img.At(xLeft+qrW/2, yTop+qrH/2)
-							rr, gg, bb, aa := sample.RGBA()
-							isWhite := uint8(rr>>8) == 0xff && uint8(gg>>8) == 0xff && uint8(bb>>8) == 0xff && uint8(aa>>8) == 0xff
-							if isWhite {
-								break
-							}
-							// Extract subimage and decode QR
-							sub, ok := img.(interface {
-								SubImage(r image.Rectangle) image.Image
-							})
-							if !ok {
-								return nil, errors.New("image type does not support SubImage")
-							}
-							qrImg := sub.SubImage(tileRect)
-							bb2, err := decodeSingleQR(qrImg)
-							if err != nil {
-								return nil, fmt.Errorf("failed to decode grid tile at (%d,%d): %w", xLeft, yTop, err)
-							}
-							payload = append(payload, bb2...)
+						if len(data) > 0 {
+							rowHasData = true
+							payload = append(payload, data...)
 						}
 					}
-					if len(payload) > 0 {
+					if !rowHasData && len(payload) > 0 {
+						// Assume we've reached the bottom of the grid.
 						return payload, nil
 					}
+				}
+				if len(payload) > 0 {
+					return payload, nil
 				}
 			}
 		}
@@ -357,6 +398,13 @@ func decodeGridOrSinglePNG(path string) ([]byte, error) {
 
 	// Fallback: treat as a single QR
 	return decodeSingleQR(img)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func decodeMode(inputPath string, outPath string) {
