@@ -921,4 +921,69 @@ func writeDecoded(data []byte, outPath string) {
 		w = os.Stdout
 	} else {
 		f, err := os.Create(outPath)
-		if
+		if err != nil {
+			log.Fatalf("Failed to create output file %s: %v", outPath, err)
+		}
+		defer f.Close()
+		w = f
+	}
+	if _, err := w.Write(data); err != nil {
+		log.Fatalf("Failed to write decoded data: %v", err)
+	}
+	if outPath != "" && outPath != "-" {
+		fmt.Printf("Decoded %d bytes to %s\n", len(data), outPath)
+	}
+}
+
+func main() {
+	// Modes: encode (default) and decode
+	mode := flag.String("mode", "encode", "Mode of operation: 'encode' to create QR images, 'decode' to read data from QR images.")
+	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
+	chunkSize := flag.Int("chunksize", 2048, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
+	delay := flag.Int("delay", 1000, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
+	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
+	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
+	flag.Parse()
+
+	switch *mode {
+	case "encode":
+		// Validate chunk size.
+		if *chunkSize <= 0 {
+			log.Fatalf("Error: chunksize must be a positive number.")
+		}
+		// QR codes can hold up to 2953 bytes with the lowest error correction.
+		if *chunkSize > 2953 {
+			log.Printf("Warning: chunksize %d is larger than the maximum capacity (2953 bytes) of a QR code. Encoding may fail.", *chunkSize)
+		}
+
+		// Validate delay.
+		if *delay <= 0 {
+			log.Fatalf("Error: delay must be a positive number.")
+		}
+		if *delay > 65535 {
+			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
+		}
+
+		// Require exactly one input file.
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputFilename := flag.Arg(0)
+		encodeMode(*format, *chunkSize, *delay, inputFilename)
+
+	case "decode":
+		// Require exactly one input file (the PNG/JPG/APNG to decode).
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputImage := flag.Arg(0)
+		decodeMode(inputImage, *outPath)
+
+	default:
+		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
+	}
+}
