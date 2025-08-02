@@ -972,7 +972,7 @@ func decodeMode(inputPath string, outPath string) {
 		return
 	case "photo":
 		// Decode as static image using photo path first
-		data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
+		data, _, count, err := decodeStaticImageFile(inputPath)
 		if err != nil {
 			log.Fatalf("Photo decode failed: %v", err)
 		}
