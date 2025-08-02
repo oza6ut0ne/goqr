@@ -185,7 +185,7 @@ func generateQRCodeImage(data []byte, size int) (image.Image, error) {
 
 	// Prepare hints: Error correction level M and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
-	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevelM
+	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevel_M
 	hints[gozxing.EncodeHintType_MARGIN] = 0
 	// Optional: specify character set to ensure binary survives (ISO-8859-1)
 	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
