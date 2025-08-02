@@ -24,7 +24,6 @@ import (
 	"github.com/makiuchi-d/gozxing"
 	"github.com/makiuchi-d/gozxing/common"
 	qrcodewriter "github.com/makiuchi-d/gozxing/qrcode"
-	"github.com/makiuchi-d/gozxing/qrcode/encoder"
 	"github.com/makiuchi-d/gozxing/multi/qrcode"
 )
 
@@ -184,23 +183,21 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 // generateQRCodeImage creates a QR code image of requested size using gozxing.
 func generateQRCodeImage(data []byte, size int) (image.Image, error) {
 	content := string(data)
-	// Encode QR with error correction level M (similar to earlier).
-	qr, err := encoder.Encode(content, encoder.ErrorCorrectionLevelM)
-	if err != nil {
-		return nil, fmt.Errorf("qr encode: %w", err)
-	}
-	// Margin of 0 to fill target size as much as possible, consistent with previous usage.
-	const margin = 0
-	bm, err := qrcodewriter.NewQRCodeWriter().EncodeWithOptions(qr, gozxing.BarcodeFormat_QR_CODE, size, size, map[gozxing.EncodeHintType]interface{}{
-		gozxing.EncodeHintType_MARGIN: margin,
-	})
+
+	// Prepare hints: Error correction level M and margin 0
+	hints := make(map[gozxing.EncodeHintType]interface{})
+	hints[qrcodewriter.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevel_M
+	hints[gozxing.EncodeHintType_MARGIN] = 0
+	// Optional: specify character set to ensure binary survives (ISO-8859-1)
+	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
+
+	writer := qrcodewriter.NewQRCodeWriter()
+	bm, err := writer.EncodeWithHint(content, gozxing.BarcodeFormat_QR_CODE, size, size, hints)
 	if err != nil {
 		return nil, fmt.Errorf("qr render: %w", err)
 	}
 
 	// Convert BitMatrix to an RGBA image.
-	b := bm.GetTopLeftOnBit()
-	_ = b // not strictly needed
 	w := bm.GetWidth()
 	h := bm.GetHeight()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -284,9 +281,12 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 // decodeSingleQR returns the payload from the best QR found in the image using gozxing.
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	src := gozxing.NewLuminanceSourceFromImage(img)
-	bmp := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
+
+	bmp, err := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizerFromSource(src))
+	if err != nil {
+		return nil, err
+	}
 	reader := qrcode.NewQRCodeMultiReader()
-	// Try multi first, if it returns one, use the first.
 	results, err := reader.DecodeMultiple(bmp, nil)
 	if err == nil && len(results) > 0 {
 		// Choose the longest payload
@@ -297,7 +297,10 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	}
 
 	// Fallback to HybridBinarizer
-	bmp2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
+	bmp2, err2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizerFromSource(src))
+	if err2 != nil {
+		return nil, err2
+	}
 	results2, err2 := reader.DecodeMultiple(bmp2, nil)
 	if err2 == nil && len(results2) > 0 {
 		sort.Slice(results2, func(i, j int) bool {
@@ -517,24 +520,28 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	for _, im := range variants {
 		src := gozxing.NewLuminanceSourceFromImage(im)
 		// Try hybrid first
-		bmp := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
-		results, err := reader.DecodeMultiple(bmp, nil)
-		if err == nil && len(results) > 0 {
-			var payloads [][]byte
-			for _, r := range results {
-				payloads = append(payloads, []byte(r.GetText()))
+		bmp, err := gozxing.NewBinaryBitmap(common.NewHybridBinarizerFromSource(src))
+		if err == nil {
+			results, err := reader.DecodeMultiple(bmp, nil)
+			if err == nil && len(results) > 0 {
+				var payloads [][]byte
+				for _, r := range results {
+					payloads = append(payloads, []byte(r.GetText()))
+				}
+				return payloads, nil
 			}
-			return payloads, nil
 		}
 		// Fallback: global histogram
-		bmp2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
-		results2, err2 := reader.DecodeMultiple(bmp2, nil)
-		if err2 == nil && len(results2) > 0 {
-			var payloads [][]byte
-			for _, r := range results2 {
-				payloads = append(payloads, []byte(r.GetText()))
+		bmp2, err2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizerFromSource(src))
+		if err2 == nil {
+			results2, err2 := reader.DecodeMultiple(bmp2, nil)
+			if err2 == nil && len(results2) > 0 {
+				var payloads [][]byte
+				for _, r := range results2 {
+					payloads = append(payloads, []byte(r.GetText()))
+				}
+				return payloads, nil
 			}
-			return payloads, nil
 		}
 	}
 
@@ -1261,7 +1268,8 @@ func main() {
 		}
 		// QR codes can hold up to ~2953 bytes at low error correction in theory,
 		// but actual capacity varies. We warn for very large chunk sizes.
-		if *chunkSize > 4096 {
+		infCapWarn := 4096
+		if *chunkSize > infCapWarn {
 			log.Printf("Warning: chunksize %d is quite large; encoding may fail for some data.", *chunkSize)
 		}
 
