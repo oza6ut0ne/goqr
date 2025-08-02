@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"flag"
@@ -151,8 +152,11 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string) {
 		binary.BigEndian.PutUint32(buf[4:8], uint32(totalFrames))
 		copy(buf[frameHeaderSize:], chunk)
 
+		// Base64-encode buffer to ASCII for QR encoding
+		b64 := base64.StdEncoding.EncodeToString(buf)
+
 		// Generate QR with gozxing at target size.
-		img, err := generateQRCodeImage(buf, pngSize)
+		img, err := generateQRCodeImage([]byte(b64), pngSize)
 		if err != nil {
 			log.Fatalf("Failed to generate QR code for frame %d: %v", frameIdx, err)
 		}
@@ -311,6 +315,10 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 				sort.Slice(results, func(i, j int) bool {
 					return len(results[i].GetText()) > len(results[j].GetText())
 				})
+				// Attempt Base64 decode. If it fails, fall back to raw bytes.
+				if decoded, derr := base64.StdEncoding.DecodeString(results[0].GetText()); derr == nil {
+					return decoded, nil
+				}
 				return []byte(results[0].GetText()), nil
 			}
 		}
@@ -323,6 +331,10 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 				sort.Slice(results, func(i, j int) bool {
 					return len(results[i].GetText()) > len(results[j].GetText())
 				})
+				// Attempt Base64 decode. If it fails, fall back to raw bytes.
+				if decoded, derr := base64.StdEncoding.DecodeString(results[0].GetText()); derr == nil {
+					return decoded, nil
+				}
 				return []byte(results[0].GetText()), nil
 			}
 		}
@@ -592,7 +604,12 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
 				var payloads [][]byte
 				for _, r := range results {
-					payloads = append(payloads, []byte(r.GetText()))
+					payload := []byte((r.GetText()))
+					// Attempt Base64 decode. If it fails, fall back to raw bytes.
+					if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
+						payload = decoded
+					}
+					payloads = append(payloads, payload)
 				}
 				return payloads, nil
 			}
@@ -602,7 +619,12 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 			if results2, err2 := reader.DecodeMultiple(bmp2, nil); err2 == nil && len(results2) > 0 {
 				var payloads [][]byte
 				for _, r := range results2 {
-					payloads = append(payloads, []byte(r.GetText()))
+					payload := []byte((r.GetText()))
+					// Attempt Base64 decode. If it fails, fall back to raw bytes.
+					if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
+						payload = decoded
+					}
+					payloads = append(payloads, payload)
 				}
 				return payloads, nil
 			}
@@ -1147,6 +1169,10 @@ func decodeMode(inputPath string, outPath string) {
 			if err := saveWholeImageBox(inputPath, img); err != nil {
 				log.Printf("debug: failed to save single debug image: %v", err)
 			}
+		}
+		// Attempt Base64 decode. If it fails, fall back to raw bytes.
+		if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
+			payload = decoded
 		}
 		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
 		writeDecoded(payload, outPath)
