@@ -509,7 +509,12 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 
 	// Robust photo-like detection for single or multiple QRs (works for PNG or JPEG).
 	if data, count, err := decodePhotoLike(img); err == nil {
-		// We don't have bounding boxes for photo-like mode with current goqr version; skip debug overlay.
+		// Save a coarse debug image (whole-image green border) for photo mode.
+		if debugMode {
+			if err := saveWholeImageBox(path, img); err != nil {
+				log.Printf("debug: failed to save photo debug image: %v", err)
+			}
+		}
 		return data, "photo", count, nil
 	}
 
