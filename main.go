@@ -21,7 +21,7 @@ import (
 
 	// gozxing imports
 	"github.com/makiuchi-d/gozxing"
-	"github.com/makiuchi-d/gozxing/common"
+	"github.com/makiuchi-d/gozxing/qrcode/decoder"
 	qrcodewriter "github.com/makiuchi-d/gozxing/qrcode"
 	"github.com/makiuchi-d/gozxing/multi/qrcode"
 )
@@ -185,7 +185,7 @@ func generateQRCodeImage(data []byte, size int) (image.Image, error) {
 
 	// Prepare hints: Error correction level M and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
-	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = qrcodewriter.ErrorCorrectionLevel_M
+	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_H
 	hints[gozxing.EncodeHintType_MARGIN] = 0
 	// Optional: specify character set to ensure binary survives (ISO-8859-1)
 	hints[gozxing.EncodeHintType_CHARACTER_SET] = "ISO-8859-1"
@@ -281,7 +281,7 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	src := gozxing.NewLuminanceSourceFromImage(img)
 
-	bmp, err := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
+	bmp, err := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +296,7 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 	}
 
 	// Fallback to HybridBinarizer
-	bmp2, err2 := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
+	bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
 	if err2 != nil {
 		return nil, err2
 	}
@@ -519,7 +519,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 	for _, im := range variants {
 		src := gozxing.NewLuminanceSourceFromImage(im)
 		// Try hybrid first
-		bmp, err := gozxing.NewBinaryBitmap(common.NewHybridBinarizer(src))
+		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
 		if err == nil {
 			results, err := reader.DecodeMultiple(bmp, nil)
 			if err == nil && len(results) > 0 {
@@ -531,7 +531,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 			}
 		}
 		// Fallback: global histogram
-		bmp2, err2 := gozxing.NewBinaryBitmap(common.NewGlobalHistogramBinarizer(src))
+		bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
 		if err2 == nil {
 			results2, err2 := reader.DecodeMultiple(bmp2, nil)
 			if err2 == nil && len(results2) > 0 {
