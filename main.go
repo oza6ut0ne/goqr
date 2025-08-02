@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -21,15 +24,94 @@ const chunkSize = 2048
 // The size of the generated PNG image in pixels.
 const pngSize = 512
 
+func createGridPNG(images []image.Image, outputFilename string) {
+	if len(images) == 0 {
+		log.Println("No images to create a grid from.")
+		return
+	}
+
+	const padding = 20 // Padding between QR codes and around the border.
+
+	// All QR codes are the same size.
+	qrWidth := images[0].Bounds().Dx()
+	qrHeight := images[0].Bounds().Dy()
+
+	// Calculate grid dimensions to be as square as possible.
+	numImages := len(images)
+	cols := int(math.Ceil(math.Sqrt(float64(numImages))))
+	rows := int(math.Ceil(float64(numImages) / float64(cols)))
+
+	// Calculate final image dimensions with padding.
+	gridWidth := cols*qrWidth + (cols+1)*padding
+	gridHeight := rows*qrHeight + (rows+1)*padding
+
+	// Create a new RGBA image to act as the canvas.
+	gridImage := image.NewRGBA(image.Rect(0, 0, gridWidth, gridHeight))
+	// Fill canvas with a white background.
+	draw.Draw(gridImage, gridImage.Bounds(), image.White, image.Point{}, draw.Src)
+
+	// Draw each QR code onto the grid.
+	for i, img := range images {
+		row := i / cols
+		col := i % cols
+		// Calculate the top-left corner for this QR code.
+		x := padding + col*(qrWidth+padding)
+		y := padding + row*(qrHeight+padding)
+		rect := image.Rect(x, y, x+qrWidth, y+qrHeight)
+		draw.Draw(gridImage, rect, img, image.Point{}, draw.Src)
+	}
+
+	// Save the final grid image.
+	outFile, err := os.Create(outputFilename)
+	if err != nil {
+		log.Fatalf("Failed to create grid output file %s: %v", outputFilename, err)
+	}
+	defer outFile.Close()
+
+	if err = png.Encode(outFile, gridImage); err != nil {
+		log.Fatalf("Failed to encode grid PNG: %v", err)
+	}
+	fmt.Printf("\nSuccessfully created grid QR code %s.\n", outputFilename)
+}
+
+func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int) {
+	fmt.Printf("Input is %d bytes, generating an animated PNG with %d frames.\n", dataLen, len(images))
+	outFile, err := os.Create(outputFilename)
+	if err != nil {
+		log.Fatalf("Failed to create output file %s: %v", outputFilename, err)
+	}
+	defer outFile.Close()
+
+	a := apng.APNG{Frames: []apng.Frame{}}
+	for i, img := range images {
+		a.Frames = append(a.Frames, apng.Frame{
+			Image:            img,
+			DelayNumerator:   1, // 1 second delay per frame
+			DelayDenominator: 1,
+		})
+		fmt.Printf("Processing frame %d...\n", i+1)
+	}
+
+	if err = apng.Encode(outFile, a); err != nil {
+		log.Fatalf("Failed to encode animated PNG: %v", err)
+	}
+	fmt.Printf("\nSuccessfully created animated QR code %s.\n", outputFilename)
+}
+
 func main() {
-	// 1. Check for a single command-line argument for the input file.
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <input-file>\n", os.Args[0])
+	// 1. Define and parse command-line flags.
+	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image.")
+	flag.Parse()
+
+	// 2. Check for a single command-line argument for the input file.
+	if len(flag.Args()) != 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <input-file>\n", os.Args[0])
+		flag.PrintDefaults()
 		os.Exit(1)
 	}
-	inputFilename := os.Args[1]
+	inputFilename := flag.Arg(0)
 
-	// 2. Read the entire input file into memory.
+	// 3. Read the entire input file into memory.
 	data, err := os.ReadFile(inputFilename)
 	if err != nil {
 		log.Fatalf("Failed to read input file %s: %v", inputFilename, err)
@@ -39,7 +121,7 @@ func main() {
 		log.Fatalf("Input file %s is empty.", inputFilename)
 	}
 
-	// 3. Generate QR codes for each chunk and store them in memory as images.
+	// 4. Generate QR codes for each chunk and store them in memory as images.
 	var images []image.Image
 	for i := 0; i < len(data); i += chunkSize {
 		end := i + chunkSize
@@ -63,34 +145,19 @@ func main() {
 		images = append(images, img)
 	}
 
-	// 4. Determine the single output filename.
+	// 5. Determine the single output filename.
 	outputFilename := "qr_" + filepath.Base(inputFilename) + ".png"
 
-	// 5. Write the output file.
+	// 6. Write the output file based on the number of images and the format flag.
 	if len(images) > 1 {
-		// If there are multiple images, create an animated PNG.
-		fmt.Printf("Input is %d bytes, generating an animated PNG with %d frames.\n", len(data), len(images))
-		outFile, err := os.Create(outputFilename)
-		if err != nil {
-			log.Fatalf("Failed to create output file %s: %v", outputFilename, err)
+		switch *format {
+		case "apng":
+			createAnimatedPNG(images, outputFilename, len(data))
+		case "grid":
+			createGridPNG(images, outputFilename)
+		default:
+			log.Fatalf("Invalid format '%s'. Please use 'apng' or 'grid'.", *format)
 		}
-		defer outFile.Close()
-
-		a := apng.APNG{Frames: []apng.Frame{}}
-		for i, img := range images {
-			a.Frames = append(a.Frames, apng.Frame{
-				Image:            img,
-				DelayNumerator:   1, // 1 second delay per frame
-				DelayDenominator: 1,
-			})
-			fmt.Printf("Processing frame %d...\n", i+1)
-		}
-
-		if err = apng.Encode(outFile, a); err != nil {
-			log.Fatalf("Failed to encode animated PNG: %v", err)
-		}
-		fmt.Printf("\nSuccessfully created animated QR code %s.\n", outputFilename)
-
 	} else {
 		// If there's only one image, write a single static PNG.
 		outFile, err := os.Create(outputFilename)
