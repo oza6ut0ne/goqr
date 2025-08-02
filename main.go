@@ -402,7 +402,7 @@ func decodeAPNG(path string) ([]byte, int, int, error) {
 		img := fr.Image
 		// Robustly skip marker frames (mostly red or mostly blue)
 		if isMostlyColor(img, color.RGBA{R: 0xff, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) ||
-			isMostlyColor(img, color.RGBA{R: 0x00, G: 0x00, B: 0xff, A: 0xff}, 32, 0.85) ||
+			isMostlyColor(img, color.RGBA{R: 0x00, G: 0x00, B: 0x00, A: 0xff}, 32, 0.85) || // blue marker
 			isSolidColor(img, color.RGBA{R: 0xff, A: 0xff}) ||
 			isSolidColor(img, color.RGBA{B: 0xff, A: 0xff}) {
 			continue
@@ -1228,4 +1228,30 @@ func main() {
 		if *delay <= 0 {
 			log.Fatalf("Error: delay must be a positive number.")
 		}
-		if *delay > 655
+		if *delay > 65535 {
+			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
+		}
+
+		// Require exactly one input file.
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputFilename := flag.Arg(0)
+		encodeMode(*format, *chunkSize, *delay, inputFilename)
+
+	case "decode":
+		// Require exactly one input file (the PNG/JPG/APNG to decode).
+		if len(flag.Args()) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage (decode): %s -mode decode [flags] <input-image.(png|jpg|jpeg)>\n", os.Args[0])
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		inputImage := flag.Arg(0)
+		decodeMode(inputImage, *outPath)
+
+	default:
+		log.Fatalf("Invalid mode '%s'. Please use 'encode' or 'decode'.", *mode)
+	}
+}
