@@ -13,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.comcom/kettek/apng"
+	"github.com/kettek/apng"
 	"github.com/skip2/go-qrcode"
 )
 
