@@ -1132,7 +1132,7 @@ func decodeMode(inputPath string, outPath string) {
 			log.Fatalf("Forced mode=apng requires a .png file")
 		}
 		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
-			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d\n", qrCount)
 			writeDecoded(data, outPath)
 			return
 		} else if err != nil {
@@ -1163,7 +1163,7 @@ func decodeMode(inputPath string, outPath string) {
 				log.Printf("debug: failed to save grid debug image: %v", err)
 			}
 		}
-		fmt.Printf("mode=decode format=grid qrs=%d\n", count)
+		fmt.Fprintf(os.Stderr, "mode=decode format=grid qrs=%d\n", count)
 		writeDecoded(data, outPath)
 		return
 	case "photo":
@@ -1173,7 +1173,7 @@ func decodeMode(inputPath string, outPath string) {
 			log.Fatalf("Photo decode failed: %v", err)
 		}
 		// Ensure we report as photo (even if fallback picked single); keep logging as photo
-		fmt.Printf("mode=decode format=photo qrs=%d\n", count)
+		fmt.Fprintf(os.Stderr, "mode=decode format=photo qrs=%d\n", count)
 		writeDecoded(data, outPath)
 		return
 	case "single":
@@ -1211,7 +1211,7 @@ func decodeMode(inputPath string, outPath string) {
 		if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
 			payload = decoded
 		}
-		fmt.Printf("mode=decode format=single qrs=%d\n", 1)
+		fmt.Fprintf(os.Stderr, "mode=decode format=single qrs=%d\n", 1)
 		writeDecoded(payload, outPath)
 		return
 	case "auto", "":
@@ -1225,7 +1225,7 @@ func decodeMode(inputPath string, outPath string) {
 	if ext == ".png" {
 		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
 			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
-			fmt.Printf("mode=decode format=apng qrs=%d\n", qrCount)
+			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d\n", qrCount)
 			writeDecoded(data, outPath)
 			return
 		}
@@ -1240,7 +1240,7 @@ func decodeMode(inputPath string, outPath string) {
 	if fmtDetected == "" {
 		fmtDetected = "unknown"
 	}
-	fmt.Printf("mode=decode format=%s qrs=%d\n", fmtDetected, count)
+	fmt.Fprintf(os.Stderr, "mode=decode format=%s qrs=%d\n", fmtDetected, count)
 	writeDecoded(data, outPath)
 }
 
