@@ -141,12 +141,18 @@ func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseN
 			end = len(data)
 		}
 		chunk := data[start:end]
+		var buf []byte
 
-		// Build 8-byte header + chunk
-		buf := make([]byte, frameHeaderSize+len(chunk))
-		binary.BigEndian.PutUint32(buf[0:4], uint32(frameIdx))
-		binary.BigEndian.PutUint32(buf[4:8], uint32(totalFrames))
-		copy(buf[frameHeaderSize:], chunk)
+		if totalFrames > 1 {
+			// Build 8-byte header + chunk
+			buf = make([]byte, frameHeaderSize+len(chunk))
+			binary.BigEndian.PutUint32(buf[0:4], uint32(frameIdx))
+			binary.BigEndian.PutUint32(buf[4:8], uint32(totalFrames))
+			copy(buf[frameHeaderSize:], chunk)
+		} else {
+			// Single frame: no header
+			buf = chunk
+		}
 
 		// Base64-encode buffer to ASCII for QR encoding
 		if base64Mode {
@@ -378,6 +384,10 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	if len(frames) == 0 {
 		return nil, 0, errors.New("no frames")
 	}
+	if len(frames) == 1 {
+		// Single frame without header
+		return frames[0], 1, nil
+	}
 	type fInfo struct {
 		idx   int
 		total int
@@ -387,10 +397,6 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	for _, fr := range frames {
 		p, idx, tot, err := parseFrameHeader8(fr)
 		if err != nil {
-			if len(frames) == 1 {
-				// Backward compatibility: single frame without header
-				return fr, 1, nil
-			}
 			return nil, 0, fmt.Errorf("bad frame header: %w", err)
 		}
 		parsed = append(parsed, fInfo{idx: idx, total: tot, data: p})
