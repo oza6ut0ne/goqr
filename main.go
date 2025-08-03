@@ -118,15 +118,11 @@ func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int,
 	fmt.Printf("\nSuccessfully created animated QR code %s.\n", outputFilename)
 }
 
-func encodeMode(format string, chunkSize int, delay int, inputFilename string, base64Mode bool) {
-	// 3. Read the entire input file into memory.
-	data, err := os.ReadFile(inputFilename)
-	if err != nil {
-		log.Fatalf("Failed to read input file %s: %v", inputFilename, err)
-	}
-
+// encodeFromBytes encodes raw data bytes into QR images and writes PNG/APNG/grid.
+// baseName is used to form the output filename.
+func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseName string, base64Mode bool) {
 	if len(data) == 0 {
-		log.Fatalf("Input file %s is empty.", inputFilename)
+		log.Fatalf("Input data is empty.")
 	}
 
 	// Account for 8-byte header per frame.
@@ -167,7 +163,7 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string, b
 	}
 
 	// 5. Determine the single output filename.
-	outputFilename := "qr_" + filepath.Base(inputFilename) + ".png"
+	outputFilename := "qr_" + baseName + ".png"
 
 	// 6. Write the output file based on the number of images and the format flag.
 	if len(images) > 1 {
@@ -202,8 +198,22 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string, b
 		if err = png.Encode(outFile, images[0]); err != nil {
 			log.Fatalf("Failed to write single QR code to file: %v", err)
 		}
-		fmt.Printf("Successfully created QR code file %s from %s.\n", outputFilename, inputFilename)
+		fmt.Printf("Successfully created QR code file %s.\n", outputFilename)
 	}
+}
+
+// encodeMode remains for backward compatibility with file input path.
+func encodeMode(format string, chunkSize int, delay int, inputFilename string, base64Mode bool) {
+	// 3. Read the entire input file into memory.
+	data, err := os.ReadFile(inputFilename)
+	if err != nil {
+		log.Fatalf("Failed to read input file %s: %v", inputFilename, err)
+	}
+	if len(data) == 0 {
+		log.Fatalf("Input file %s is empty.", inputFilename)
+	}
+	baseName := filepath.Base(inputFilename)
+	encodeFromBytes(format, chunkSize, delay, data, baseName, base64Mode)
 }
 
 // generateQRCodeImage creates a QR code image of requested size using gozxing.
@@ -1357,9 +1367,22 @@ func main() {
 			log.Fatalf("Error: delay cannot be greater than 65535 milliseconds.")
 		}
 
+		// If no input file specified, then read from stdin
+		if len(flag.Args()) == 0 {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				log.Fatalf("Failed to read from stdin: %v", err)
+			}
+			if len(data) == 0 {
+				log.Fatalf("Stdin is empty.")
+			}
+			encodeFromBytes(*format, *chunkSize, *delay, data, "stdin", *base64Mode)
+			return
+		}
+
 		// Require exactly one input file.
 		if len(flag.Args()) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "Usage (encode): %s -mode encode [flags] <input-file>\n       or: %s -mode encode [flags] < input\n", os.Args[0], os.Args[0])
 			flag.PrintDefaults()
 			os.Exit(1)
 		}
