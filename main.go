@@ -120,7 +120,7 @@ func createAnimatedPNG(images []image.Image, outputFilename string, dataLen int,
 
 // encodeFromBytes encodes raw data bytes into QR images and writes PNG/APNG/grid.
 // baseName is used to form the output filename.
-func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseName string, base64Mode bool) {
+func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseName string, errorLevel string, base64Mode bool) {
 	if len(data) == 0 {
 		log.Fatalf("Input data is empty.")
 	}
@@ -160,7 +160,7 @@ func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseN
 		}
 
 		// Generate QR with gozxing at target size.
-		img, err := generateQRCodeImage([]byte(buf), pngSize, base64Mode)
+		img, err := generateQRCodeImage([]byte(buf), pngSize, errorLevel, base64Mode)
 		if err != nil {
 			log.Fatalf("Failed to generate QR code for frame %d: %v", frameIdx, err)
 		}
@@ -209,7 +209,7 @@ func encodeFromBytes(format string, chunkSize int, delay int, data []byte, baseN
 }
 
 // encodeMode remains for backward compatibility with file input path.
-func encodeMode(format string, chunkSize int, delay int, inputFilename string, base64Mode bool) {
+func encodeMode(format string, chunkSize int, delay int, inputFilename string, errorLevel string, base64Mode bool) {
 	// 3. Read the entire input file into memory.
 	data, err := os.ReadFile(inputFilename)
 	if err != nil {
@@ -219,16 +219,28 @@ func encodeMode(format string, chunkSize int, delay int, inputFilename string, b
 		log.Fatalf("Input file %s is empty.", inputFilename)
 	}
 	baseName := filepath.Base(inputFilename)
-	encodeFromBytes(format, chunkSize, delay, data, baseName, base64Mode)
+	encodeFromBytes(format, chunkSize, delay, data, baseName, errorLevel, base64Mode)
 }
 
 // generateQRCodeImage creates a QR code image of requested size using gozxing.
-func generateQRCodeImage(data []byte, size int, base64Mode bool) (image.Image, error) {
+func generateQRCodeImage(data []byte, size int, errorLevel string, base64Mode bool) (image.Image, error) {
 	content := string(data)
 
 	// Prepare hints: Error correction level H (robust) and margin 0
 	hints := make(map[gozxing.EncodeHintType]interface{})
-	hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_H
+	switch errorLevel {
+	case "L":
+		hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_L
+	case "M":
+		hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_M
+	case "Q":
+		hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_Q
+	case "H":
+		hints[gozxing.EncodeHintType_ERROR_CORRECTION] = decoder.ErrorCorrectionLevel_H
+	default:
+		return nil, fmt.Errorf("error level must be one of L, M, Q, H")
+	}
+
 	hints[gozxing.EncodeHintType_MARGIN] = 0
 	if base64Mode {
 		// Use ISO-8859-1 to preserve arbitrary binary data
@@ -1347,10 +1359,11 @@ func main() {
 	format := flag.String("format", "apng", "Output format for multiple QR codes: 'apng' for animated PNG or 'grid' for a single grid image. (encode mode only)")
 	chunkSize := flag.Int("chunksize", 768, "The size of each data chunk to be encoded in a single QR code frame. (encode mode only)")
 	delay := flag.Int("delay", 120, "The delay between frames in milliseconds for animated PNGs. (encode mode only)")
+	errorLevel := flag.String("error-level", "H", "Error correction level of generated QR code. (encode mode only)")
+	base64Mode := flag.Bool("base64", false, "Enable base64 encoding before encoding to QR images. (encode mode only)")
 	outPath := flag.String("out", "", "Output path for decoded data; use '-' or empty for stdout. (decode mode only)")
-	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
-	base64Mode := flag.Bool("base64", false, "Enable base64 encoding before encoding to QR images")
 	flag.StringVar(&decodeModeFlag, "decode-mode", "auto", "Force decode mode: 'auto' (default), 'apng', 'grid', 'photo', or 'single'.")
+	flag.BoolVar(&debugMode, "debug", false, "Enable saving a debug image with green boxes around detected QRs during decode.")
 	flag.Parse()
 
 	switch *mode {
@@ -1382,7 +1395,7 @@ func main() {
 			if len(data) == 0 {
 				log.Fatalf("Stdin is empty.")
 			}
-			encodeFromBytes(*format, *chunkSize, *delay, data, "stdin", *base64Mode)
+			encodeFromBytes(*format, *chunkSize, *delay, data, "stdin", *errorLevel, *base64Mode)
 			return
 		}
 
@@ -1393,7 +1406,7 @@ func main() {
 			os.Exit(1)
 		}
 		inputFilename := flag.Arg(0)
-		encodeMode(*format, *chunkSize, *delay, inputFilename, *base64Mode)
+		encodeMode(*format, *chunkSize, *delay, inputFilename, *errorLevel, *base64Mode)
 
 	case "decode":
 		// Require exactly one input file (the PNG/JPG/APNG to decode).
