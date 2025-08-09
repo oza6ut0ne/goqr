@@ -612,8 +612,27 @@ func cropMargins(src image.Image) image.Image {
 	return dst
 }
 
+// QRResult holds the decoded payload and the detected result points
+type QRResult struct {
+	Payload []byte
+	Result  *gozxing.Result
+}
+
 // detectAllQRCodes tries multiple preprocess/rotation variants and returns raw decoded payloads (as bytes).
 func detectAllQRCodes(img image.Image) ([][]byte, error) {
+	qrResults, err := detectAllQRCodesWithPositions(img)
+	if err != nil {
+		return nil, err
+	}
+	var payloads [][]byte
+	for _, qr := range qrResults {
+		payloads = append(payloads, qr.Payload)
+	}
+	return payloads, nil
+}
+
+// detectAllQRCodesWithPositions tries multiple preprocess/rotation variants and returns QR results with position info.
+func detectAllQRCodesWithPositions(img image.Image) ([]QRResult, error) {
 	var variants []image.Image
 
 	// Base variants
@@ -639,31 +658,31 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 		// Try Hybrid first
 		if bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src)); err == nil {
 			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
-				var payloads [][]byte
+				var qrResults []QRResult
 				for _, r := range results {
 					payload := []byte((r.GetText()))
 					// Attempt Base64 decode. If it fails, fall back to raw bytes.
 					if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
 						payload = decoded
 					}
-					payloads = append(payloads, payload)
+					qrResults = append(qrResults, QRResult{Payload: payload, Result: r})
 				}
-				return payloads, nil
+				return qrResults, nil
 			}
 		}
 		// Fallback: Global Histogram
 		if bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src)); err2 == nil {
 			if results2, err2 := reader.DecodeMultiple(bmp2, nil); err2 == nil && len(results2) > 0 {
-				var payloads [][]byte
+				var qrResults []QRResult
 				for _, r := range results2 {
 					payload := []byte((r.GetText()))
 					// Attempt Base64 decode. If it fails, fall back to raw bytes.
 					if decoded, derr := base64.StdEncoding.DecodeString(string(payload)); derr == nil {
 						payload = decoded
 					}
-					payloads = append(payloads, payload)
+					qrResults = append(qrResults, QRResult{Payload: payload, Result: r})
 				}
-				return payloads, nil
+				return qrResults, nil
 			}
 		}
 	}
@@ -679,16 +698,68 @@ func orderPayloadsForGrid(payloads [][]byte) [][]byte {
 	return payloads
 }
 
-// drawSymbolsDebug: try to estimate and draw per-QR rectangles for photo-like inputs.
-// Fall back to whole-image rectangle if estimation fails.
+// drawSymbolsDebug: draw rectangles around actual detected QR codes.
+// Fall back to estimation or whole-image rectangle if detection fails.
 func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) error {
 	b := src.Bounds()
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 	green := color.RGBA{R: 0x00, G: 0xff, B: 0x00, A: 0xff}
 
-	// Attempt a simple grid inference similar to grid heuristic
-	// Only run when background is mostly white
+	// Try to get actual detected QR positions first
+	qrResults, err := detectAllQRCodesWithPositions(src)
+	if err == nil && len(qrResults) > 0 {
+		// Draw rectangles around actual detected QR codes
+		for _, qr := range qrResults {
+			if qr.Result != nil {
+				points := qr.Result.GetResultPoints()
+				if len(points) >= 3 {
+					// Calculate bounding rectangle from result points
+					minX, minY := float64(b.Max.X), float64(b.Max.Y)
+					maxX, maxY := float64(b.Min.X), float64(b.Min.Y)
+
+					for _, point := range points {
+						if point != nil {
+							x, y := point.GetX(), point.GetY()
+							if x < minX {
+								minX = x
+							}
+							if x > maxX {
+								maxX = x
+							}
+							if y < minY {
+								minY = y
+							}
+							if y > maxY {
+								maxY = y
+							}
+						}
+					}
+
+					// Add some padding and ensure bounds are within image
+					padding := 5.0
+					minXInt := max(b.Min.X, int(minX-padding))
+					minYInt := max(b.Min.Y, int(minY-padding))
+					maxXInt := min(b.Max.X, int(maxX+padding))
+					maxYInt := min(b.Max.Y, int(maxY+padding))
+
+					rect := image.Rect(minXInt, minYInt, maxXInt, maxYInt)
+					thickness := max(2, (maxXInt-minXInt)/40)
+					drawRect(rgba, rect, green, thickness)
+				}
+			}
+		}
+
+		out := debugOutputPath(inputPath)
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return png.Encode(f, rgba)
+	}
+
+	// Fallback to grid estimation for white background images
 	bg := src.At(b.Min.X, b.Min.Y)
 	r, g, bl, a := bg.RGBA()
 	isWhiteBG := uint8(r>>8) == 0xff && uint8(g>>8) == 0xff && uint8(bl>>8) == 0xff && uint8(a>>8) == 0xff
@@ -1203,7 +1274,16 @@ func decodeMode(inputPath string, outPath string) {
 			payload = p
 		}
 		if debugMode {
-			if err := saveWholeImageBox(inputPath, img); err != nil {
+			// Try to draw actual detected position, fall back to whole image box
+			if qrResults, err := detectAllQRCodesWithPositions(img); err == nil && len(qrResults) > 0 {
+				var payloads [][]byte
+				for _, qr := range qrResults {
+					payloads = append(payloads, qr.Payload)
+				}
+				if err := drawSymbolsDebug(inputPath, img, payloads); err != nil {
+					log.Printf("debug: failed to save single debug image: %v", err)
+				}
+			} else if err := saveWholeImageBox(inputPath, img); err != nil {
 				log.Printf("debug: failed to save single debug image: %v", err)
 			}
 		}
@@ -1343,7 +1423,16 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 			payload = p
 		}
 		if debugMode {
-			if err := saveWholeImageBox(path, img); err != nil {
+			// Try to draw actual detected position, fall back to whole image box
+			if qrResults, err := detectAllQRCodesWithPositions(img); err == nil && len(qrResults) > 0 {
+				var payloads [][]byte
+				for _, qr := range qrResults {
+					payloads = append(payloads, qr.Payload)
+				}
+				if err := drawSymbolsDebug(path, img, payloads); err != nil {
+					log.Printf("debug: failed to save single debug image: %v", err)
+				}
+			} else if err := saveWholeImageBox(path, img); err != nil {
 				log.Printf("debug: failed to save single debug image: %v", err)
 			}
 		}
