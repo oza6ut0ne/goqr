@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -340,13 +341,16 @@ func isMostlyColor(img image.Image, target color.RGBA, tol uint8, minRatio float
 // decodeSingleQR returns the payload from the best QR found in the image using gozxing.
 func decodeSingleQR(img image.Image) ([]byte, error) {
 	src := gozxing.NewLuminanceSourceFromImage(img)
+	hints := map[gozxing.DecodeHintType]interface{}{
+		gozxing.DecodeHintType_TRY_HARDER: true,
+	}
 
 	// Try Hybrid first, then Global
 	{
 		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src))
 		if err == nil {
 			reader := qrcode.NewQRCodeMultiReader()
-			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
+			if results, err := reader.DecodeMultiple(bmp, hints); err == nil && len(results) > 0 {
 				sort.Slice(results, func(i, j int) bool {
 					return len(results[i].GetText()) > len(results[j].GetText())
 				})
@@ -362,7 +366,7 @@ func decodeSingleQR(img image.Image) ([]byte, error) {
 		bmp, err := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src))
 		if err == nil {
 			reader := qrcode.NewQRCodeMultiReader()
-			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
+			if results, err := reader.DecodeMultiple(bmp, hints); err == nil && len(results) > 0 {
 				sort.Slice(results, func(i, j int) bool {
 					return len(results[i].GetText()) > len(results[j].GetText())
 				})
@@ -422,6 +426,7 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	}
 	// Sort and concat
 	sort.Slice(parsed, func(i, j int) bool { return parsed[i].idx < parsed[j].idx })
+	parsed = slices.CompactFunc(parsed, func(e1, e2 fInfo) bool { return e1.idx == e2.idx })
 	var out []byte
 	for _, f := range parsed {
 		out = append(out, f.data...)
@@ -632,6 +637,7 @@ func detectAllQRCodes(img image.Image) ([][]byte, error) {
 }
 
 // detectAllQRCodesWithPositions tries multiple preprocess/rotation variants and returns QR results with position info.
+// FIXME: adjust positions for variants.
 func detectAllQRCodesWithPositions(img image.Image) ([]QRResult, error) {
 	var variants []image.Image
 
@@ -650,15 +656,19 @@ func detectAllQRCodesWithPositions(img image.Image) ([]QRResult, error) {
 	}
 	makeRotations(img)
 	makeRotations(cropMargins(img))
+	makeRotations(grayscale(img))
 	makeRotations(boostContrast(img))
 
 	reader := qrcode.NewQRCodeMultiReader()
+	hints := map[gozxing.DecodeHintType]interface{}{
+		gozxing.DecodeHintType_TRY_HARDER: true,
+	}
+	var qrResults []QRResult
 	for _, im := range variants {
 		src := gozxing.NewLuminanceSourceFromImage(im)
 		// Try Hybrid first
 		if bmp, err := gozxing.NewBinaryBitmap(gozxing.NewHybridBinarizer(src)); err == nil {
-			if results, err := reader.DecodeMultiple(bmp, nil); err == nil && len(results) > 0 {
-				var qrResults []QRResult
+			if results, err := reader.DecodeMultiple(bmp, hints); err == nil && len(results) > 0 {
 				for _, r := range results {
 					payload := []byte((r.GetText()))
 					// Attempt Base64 decode. If it fails, fall back to raw bytes.
@@ -667,13 +677,11 @@ func detectAllQRCodesWithPositions(img image.Image) ([]QRResult, error) {
 					}
 					qrResults = append(qrResults, QRResult{Payload: payload, Result: r})
 				}
-				return qrResults, nil
 			}
 		}
 		// Fallback: Global Histogram
 		if bmp2, err2 := gozxing.NewBinaryBitmap(gozxing.NewGlobalHistgramBinarizer(src)); err2 == nil {
-			if results2, err2 := reader.DecodeMultiple(bmp2, nil); err2 == nil && len(results2) > 0 {
-				var qrResults []QRResult
+			if results2, err2 := reader.DecodeMultiple(bmp2, hints); err2 == nil && len(results2) > 0 {
 				for _, r := range results2 {
 					payload := []byte((r.GetText()))
 					// Attempt Base64 decode. If it fails, fall back to raw bytes.
@@ -682,11 +690,13 @@ func detectAllQRCodesWithPositions(img image.Image) ([]QRResult, error) {
 					}
 					qrResults = append(qrResults, QRResult{Payload: payload, Result: r})
 				}
-				return qrResults, nil
 			}
 		}
 	}
 
+	if len(qrResults) > 0 {
+		return qrResults, nil
+	}
 	return nil, errors.New("no QR codes detected")
 }
 
