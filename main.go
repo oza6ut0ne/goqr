@@ -427,6 +427,12 @@ func reassembleFrames(frames [][]byte) ([]byte, int, int, error) {
 	// Sort and concat
 	sort.Slice(parsed, func(i, j int) bool { return parsed[i].idx < parsed[j].idx })
 	parsed = slices.CompactFunc(parsed, func(e1, e2 fInfo) bool { return e1.idx == e2.idx })
+
+	if len(parsed) == 1 {
+		// Single frame without header
+		return frames[0], 1, 1, nil
+	}
+
 	var out []byte
 	for _, f := range parsed {
 		out = append(out, f.data...)
@@ -1046,10 +1052,6 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, int, error) {
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	// Strip header if present
-	if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
-		payload = p
-	}
 	return payload, 1, 1, nil
 }
 
@@ -1291,10 +1293,6 @@ func decodeMode(inputPath string, outPath string) {
 		payload, err := decodeSingleQR(img)
 		if err != nil {
 			log.Fatalf("Single decode failed: %v", err)
-		}
-		// Strip 8-byte header if present
-		if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
-			payload = p
 		}
 		if debugMode {
 			// Try to draw actual detected position, fall back to whole image box
