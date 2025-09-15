@@ -396,13 +396,13 @@ func parseFrameHeader8(frame []byte) (payload []byte, idx int, total int, err er
 }
 
 // Reassemble frames using 8-byte headers. If headers are missing and only one frame is present, return it as-is.
-func reassembleFrames(frames [][]byte) ([]byte, int, error) {
+func reassembleFrames(frames [][]byte) ([]byte, int, int, error) {
 	if len(frames) == 0 {
-		return nil, 0, errors.New("no frames")
+		return nil, 0, 0, errors.New("no frames")
 	}
 	if len(frames) == 1 {
 		// Single frame without header
-		return frames[0], 1, nil
+		return frames[0], 1, 1, nil
 	}
 	type fInfo struct {
 		idx   int
@@ -413,7 +413,7 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	for _, fr := range frames {
 		p, idx, tot, err := parseFrameHeader8(fr)
 		if err != nil {
-			return nil, 0, fmt.Errorf("bad frame header: %w", err)
+			return nil, 0, 0, fmt.Errorf("bad frame header: %w", err)
 		}
 		parsed = append(parsed, fInfo{idx: idx, total: tot, data: p})
 	}
@@ -421,7 +421,7 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	expected := parsed[0].total
 	for _, f := range parsed {
 		if f.total != expected {
-			return nil, 0, errors.New("inconsistent total frames across frames")
+			return nil, 0, 0, errors.New("inconsistent total frames across frames")
 		}
 	}
 	// Sort and concat
@@ -431,20 +431,20 @@ func reassembleFrames(frames [][]byte) ([]byte, int, error) {
 	for _, f := range parsed {
 		out = append(out, f.data...)
 	}
-	return out, expected, nil
+	return out, len(parsed), expected, nil
 }
 
-// decodeAPNG decodes APNG and returns data, number of QR frames decoded (total), and number of non-marker frames.
-func decodeAPNG(path string) ([]byte, int, int, error) {
+// decodeAPNG decodes APNG and returns data, number of QR frames (found, total), and number of non-marker frames.
+func decodeAPNG(path string) ([]byte, int, int, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	defer f.Close()
 
 	a, err := apng.DecodeAll(f)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("not an APNG or failed to decode APNG: %w", err)
+		return nil, 0, 0, 0, fmt.Errorf("not an APNG or failed to decode APNG: %w", err)
 	}
 
 	var frames [][]byte
@@ -468,13 +468,13 @@ func decodeAPNG(path string) ([]byte, int, int, error) {
 		frames = append(frames, b)
 	}
 	if qrCount == 0 {
-		return nil, 0, nonMarkerFrames, errors.New("no data decoded from APNG frames")
+		return nil, 0, 0, nonMarkerFrames, errors.New("no data decoded from APNG frames")
 	}
-	data, total, err := reassembleFrames(frames)
+	data, found, total, err := reassembleFrames(frames)
 	if err != nil {
-		return nil, 0, nonMarkerFrames, err
+		return nil, 0, 0, nonMarkerFrames, err
 	}
-	return data, total, nonMarkerFrames, nil
+	return data, found, total, nonMarkerFrames, nil
 }
 
 func isWhite(pxR, pxG, pxB, pxA uint32) bool {
@@ -879,8 +879,8 @@ func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) erro
 }
 
 // The previous grid heuristic, refactored to accept an already-decoded image.
-// Returns data and number of tiles decoded (interpreted as total frames if headers present).
-func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
+// Returns data and number of found QR codes and total frames in headers.
+func decodeGridHeuristic(img image.Image) ([]byte, int, int, error) {
 	// Try grid extraction first using known layout (white bg, padding = gridPadding).
 	b := img.Bounds()
 	bg := img.At(b.Min.X, b.Min.Y)
@@ -956,7 +956,7 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 				SubImage(r image.Rectangle) image.Image
 			})
 			if !ok {
-				return nil, 0, errors.New("image type does not support SubImage")
+				return nil, 0, 0, errors.New("image type does not support SubImage")
 			}
 
 			cols := 0
@@ -988,8 +988,8 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 					if err != nil {
 						if col == 0 {
 							if len(frames) > 0 {
-								out, total, err := reassembleFrames(frames)
-								return out, total, err
+								out, found, total, err := reassembleFrames(frames)
+								return out, found, total, err
 							}
 							rows = 0
 							cols = 0
@@ -1003,13 +1003,13 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 					}
 				}
 				if !rowHasData && len(frames) > 0 {
-					out, total, err := reassembleFrames(frames)
-					return out, total, err
+					out, found, total, err := reassembleFrames(frames)
+					return out, found, total, err
 				}
 			}
 			if len(frames) > 0 {
-				out, total, err := reassembleFrames(frames)
-				return out, total, err
+				out, found, total, err := reassembleFrames(frames)
+				return out, found, total, err
 			}
 		}
 	}
@@ -1017,13 +1017,13 @@ func decodeGridHeuristic(img image.Image) ([]byte, int, error) {
 	// Fallback: treat as a single QR
 	payload, err := decodeSingleQR(img)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	// Strip header if present
 	if p, _, _, err2 := parseFrameHeader8(payload); err2 == nil {
 		payload = p
 	}
-	return payload, 1, nil
+	return payload, 1, 1, nil
 }
 
 func drawRect(img draw.Image, r image.Rectangle, c color.Color, thickness int) {
@@ -1212,14 +1212,14 @@ func decodeMode(inputPath string, outPath string) {
 		if ext != ".png" {
 			log.Fatalf("Forced mode=apng requires a .png file")
 		}
-		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
-			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d\n", qrCount)
+		if data, found, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d/%d\n", found, qrCount)
 			writeDecoded(data, outPath)
 			return
 		} else if err != nil {
 			log.Fatalf("APNG decode failed: %v", err)
 		} else {
-			log.Fatalf("APNG decode did not yield enough frames (nonMarker=%d qrs=%d)", nonMarker, qrCount)
+			log.Fatalf("APNG decode did not yield enough frames (nonMarker=%d qrs=%d/%d)", nonMarker, found, qrCount)
 		}
 	case "grid":
 		// Open PNG and run grid heuristic
@@ -1235,26 +1235,26 @@ func decodeMode(inputPath string, outPath string) {
 		if err != nil {
 			log.Fatalf("Failed to decode PNG: %v", err)
 		}
-		data, count, err := decodeGridHeuristic(img)
+		data, found, total, err := decodeGridHeuristic(img)
 		if err != nil {
 			log.Fatalf("Grid decode failed: %v", err)
 		}
 		if debugMode {
-			if err := saveGridDebugImage(inputPath, img, count); err != nil {
+			if err := saveGridDebugImage(inputPath, img, total); err != nil {
 				log.Printf("debug: failed to save grid debug image: %v", err)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "mode=decode format=grid qrs=%d\n", count)
+		fmt.Fprintf(os.Stderr, "mode=decode format=grid qrs=%d/%d\n", found, total)
 		writeDecoded(data, outPath)
 		return
 	case "photo":
 		// Decode as static image using photo path first
-		data, _, count, err := decodeStaticImageFile(inputPath)
+		data, _, found, total, err := decodeStaticImageFile(inputPath)
 		if err != nil {
 			log.Fatalf("Photo decode failed: %v", err)
 		}
 		// Ensure we report as photo (even if fallback picked single); keep logging as photo
-		fmt.Fprintf(os.Stderr, "mode=decode format=photo qrs=%d\n", count)
+		fmt.Fprintf(os.Stderr, "mode=decode format=photo qrs=%d/%d\n", found, total)
 		writeDecoded(data, outPath)
 		return
 	case "single":
@@ -1313,9 +1313,9 @@ func decodeMode(inputPath string, outPath string) {
 	// Auto-detection flow (existing behavior)
 	// For PNGs, try APNG first as before.
 	if ext == ".png" {
-		if data, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
+		if data, found, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
 			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
-			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d\n", qrCount)
+			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d/%d\n", found, qrCount)
 			writeDecoded(data, outPath)
 			return
 		}
@@ -1323,14 +1323,14 @@ func decodeMode(inputPath string, outPath string) {
 	}
 
 	// Static image decode path supports PNG and JPEG.
-	data, fmtDetected, count, err := decodeStaticImageFile(inputPath)
+	data, fmtDetected, found, total, err := decodeStaticImageFile(inputPath)
 	if err != nil {
 		log.Fatalf("Decode failed: %v", err)
 	}
 	if fmtDetected == "" {
 		fmtDetected = "unknown"
 	}
-	fmt.Fprintf(os.Stderr, "mode=decode format=%s qrs=%d\n", fmtDetected, count)
+	fmt.Fprintf(os.Stderr, "mode=decode format=%s qrs=%d/%d\n", fmtDetected, found, total)
 	writeDecoded(data, outPath)
 }
 
@@ -1355,12 +1355,12 @@ func writeDecoded(data []byte, outPath string) {
 }
 
 // decodeStaticImageFile decodes a static image file (PNG or JPEG) and tries multiple QR detection strategies.
-func decodeStaticImageFile(path string) ([]byte, string, int, error) {
+func decodeStaticImageFile(path string) ([]byte, string, int, int, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	// Open file
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, "", 0, err
+		return nil, "", 0, 0, err
 	}
 	defer f.Close()
 
@@ -1378,27 +1378,27 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 			_ = f.Close()
 			f2, err2 := os.Open(path)
 			if err2 != nil {
-				return nil, "", 0, err2
+				return nil, "", 0, 0, err2
 			}
 			defer f2.Close()
 			img, err = jpeg.Decode(f2)
 		}
 	}
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("failed to decode image %s: %w", path, err)
+		return nil, "", 0, 0, fmt.Errorf("failed to decode image %s: %w", path, err)
 	}
 
 	// Photo-like robust multi-QR decode (assumes a photographed grid)
 	if payloads, err := detectAllQRCodes(img); err == nil && len(payloads) > 0 {
 		ordered := orderPayloadsForGrid(payloads)
-		data, total, err := reassembleFrames(ordered)
+		data, found, total, err := reassembleFrames(ordered)
 		if err == nil {
 			if debugMode {
 				if err := drawSymbolsDebug(path, img, ordered); err != nil {
 					log.Printf("debug: failed to save photo debug image: %v", err)
 				}
 			}
-			return data, "photo", total, nil
+			return data, "photo", found, total, nil
 		}
 	}
 
@@ -1407,22 +1407,22 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
 		ff, err := os.Open(path)
 		if err != nil {
-			return nil, "", 0, err
+			return nil, "", 0, 0, err
 		}
 		defer ff.Close()
 		pimg, err := png.Decode(ff)
 		if err != nil {
-			return nil, "", 0, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
+			return nil, "", 0, 0, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
 		}
-		data, count, err := decodeGridHeuristic(pimg)
+		data, found, total, err := decodeGridHeuristic(pimg)
 		if err == nil {
 			// For grid heuristic, draw rectangles where we decoded tiles.
 			if debugMode {
-				if err := saveGridDebugImage(path, pimg, count); err != nil {
+				if err := saveGridDebugImage(path, pimg, total); err != nil {
 					log.Printf("debug: failed to save grid debug image: %v", err)
 				}
 			}
-			return data, "grid", count, nil
+			return data, "grid", found, total, nil
 		}
 	}
 
@@ -1446,10 +1446,10 @@ func decodeStaticImageFile(path string) ([]byte, string, int, error) {
 				log.Printf("debug: failed to save single debug image: %v", err)
 			}
 		}
-		return payload, "single", 1, nil
+		return payload, "single", 1, 1, nil
 	}
 
-	return nil, "", 0, errors.New("failed to decode QR(s) from image")
+	return nil, "", 0, 0, errors.New("failed to decode QR(s) from image")
 }
 
 func main() {
