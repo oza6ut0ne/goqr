@@ -1189,12 +1189,15 @@ func saveGridDebugImage(inputPath string, src image.Image, tileCount int) error 
 			for row := 0; row < rows; row++ {
 				yTop := b.Min.Y + gridPadding + row*(qrH+gridPadding)
 				for col := 0; col < cols; col++ {
+					if row == 0 && col == 0 {
+						continue
+					}
 					xLeft := b.Min.X + gridPadding + col*(qrW+gridPadding)
 					tileRect := image.Rect(xLeft, yTop, min(xLeft+qrW, b.Max.X), min(yTop+qrH, b.Max.Y))
 					drawRect(rgba, tileRect, green, thickness)
 					count++
 					if tileCount > 0 && count >= tileCount {
-						// Optional: could stop early, but drawing all helps visualize layout
+						break
 					}
 				}
 			}
