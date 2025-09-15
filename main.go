@@ -878,6 +878,33 @@ func drawSymbolsDebug(inputPath string, src image.Image, payloads [][]byte) erro
 	return png.Encode(f, rgba)
 }
 
+// Returns data and number of found QR codes and total frames in headers.
+func decodeGrid(path string) ([]byte, int, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer f.Close()
+
+	img, err := png.Decode(f)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
+	}
+
+	data, found, total, err := decodeGridHeuristic(img)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("Grid decode failed: %v", err)
+	}
+
+	// For grid heuristic, draw rectangles where we decoded tiles.
+	if debugMode {
+		if err := saveGridDebugImage(path, img, total); err != nil {
+			log.Printf("debug: failed to save grid debug image: %v", err)
+		}
+	}
+	return data, found, total, nil
+}
+
 // The previous grid heuristic, refactored to accept an already-decoded image.
 // Returns data and number of found QR codes and total frames in headers.
 func decodeGridHeuristic(img image.Image) ([]byte, int, int, error) {
@@ -1226,23 +1253,9 @@ func decodeMode(inputPath string, outPath string) {
 		if ext != ".png" {
 			log.Fatalf("Forced mode=grid requires a .png file")
 		}
-		f, err := os.Open(inputPath)
-		if err != nil {
-			log.Fatalf("Failed to open image: %v", err)
-		}
-		defer f.Close()
-		img, err := png.Decode(f)
-		if err != nil {
-			log.Fatalf("Failed to decode PNG: %v", err)
-		}
-		data, found, total, err := decodeGridHeuristic(img)
+		data, found, total, err := decodeGrid(inputPath)
 		if err != nil {
 			log.Fatalf("Grid decode failed: %v", err)
-		}
-		if debugMode {
-			if err := saveGridDebugImage(inputPath, img, total); err != nil {
-				log.Printf("debug: failed to save grid debug image: %v", err)
-			}
 		}
 		fmt.Fprintf(os.Stderr, "mode=decode format=grid qrs=%d/%d\n", found, total)
 		writeDecoded(data, outPath)
@@ -1311,11 +1324,18 @@ func decodeMode(inputPath string, outPath string) {
 	}
 
 	// Auto-detection flow (existing behavior)
-	// For PNGs, try APNG first as before.
 	if ext == ".png" {
+		// For PNGs, try APNG first as before.
 		if data, found, qrCount, nonMarker, err := decodeAPNG(inputPath); err == nil && nonMarker >= 2 && qrCount >= 2 {
 			// Accept APNG only if there are at least 2 non-marker frames and >=2 decodable QR frames.
 			fmt.Fprintf(os.Stderr, "mode=decode format=apng qrs=%d/%d\n", found, qrCount)
+			writeDecoded(data, outPath)
+			return
+		}
+
+		// Then try grid.
+		if data, found, total, err := decodeGrid(inputPath); err == nil && found == total {
+			fmt.Fprintf(os.Stderr, "mode=decode format=grid qrs=%d/%d\n", found, total)
 			writeDecoded(data, outPath)
 			return
 		}
@@ -1404,24 +1424,8 @@ func decodeStaticImageFile(path string) ([]byte, string, int, int, error) {
 
 	// If PNG, try exact grid heuristic as last resort (for generated grids).
 	if ext == ".png" {
-		// Re-open to decode again for grid heuristic path which expects png.Image for SubImage etc.
-		ff, err := os.Open(path)
-		if err != nil {
-			return nil, "", 0, 0, err
-		}
-		defer ff.Close()
-		pimg, err := png.Decode(ff)
-		if err != nil {
-			return nil, "", 0, 0, fmt.Errorf("failed to decode PNG for grid decode: %w", err)
-		}
-		data, found, total, err := decodeGridHeuristic(pimg)
+		data, found, total, err := decodeGrid(path)
 		if err == nil {
-			// For grid heuristic, draw rectangles where we decoded tiles.
-			if debugMode {
-				if err := saveGridDebugImage(path, pimg, total); err != nil {
-					log.Printf("debug: failed to save grid debug image: %v", err)
-				}
-			}
 			return data, "grid", found, total, nil
 		}
 	}
